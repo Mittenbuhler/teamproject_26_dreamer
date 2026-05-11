@@ -1,6 +1,7 @@
 """
 Tests für CartPoleA2C.py
-Ausführen mit: pytest example_code/CartPoleA2C_test.py -v
+In das richtige Verzeichnis wechseln: teamproject_26_dreamer
+Dann ausführen mit: python3 -m pytest example_code/CartPoleA2C_test.py -v
 """
 
 import os

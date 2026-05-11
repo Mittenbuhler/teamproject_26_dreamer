@@ -99,21 +99,7 @@ class A2CAgentFrozenLake:
         return episode_rewards
 
 
-# ── Training starten ──────────────────────────────────────────────────────────
-
-env = gym.make("FrozenLake-v1", is_slippery=False)
-a2c_model = A2CAgentFrozenLake(env)
-episode_rewards = a2c_model.train()
-
-
-# ── GIF aufnehmen ─────────────────────────────────────────────────────────────
-
-try:
-    render_env = gym.make("FrozenLake-v1", is_slippery=False, render_mode="rgb_array")
-    use_legacy_render = False
-except TypeError:
-    render_env = gym.make("FrozenLake-v1", is_slippery=False)
-    use_legacy_render = True
+# ── Hilfsfunktionen ───────────────────────────────────────────────────────────
 
 def unpack_reset(reset_result):
     if isinstance(reset_result, tuple):
@@ -136,7 +122,7 @@ def render_frame(env, use_legacy_render):
 
 def record_episode(agent, env, use_legacy_render, output_path="a2c_frozenlake.gif"):
     frames = []
-    observation   = unpack_reset(env.reset())
+    observation    = unpack_reset(env.reset())
     episode_reward = 0
     done           = False
     device         = next(agent.policy_net.parameters()).device
@@ -155,8 +141,24 @@ def record_episode(agent, env, use_legacy_render, output_path="a2c_frozenlake.gi
     return output_path, episode_reward
 
 
-gif_path, episode_reward = record_episode(a2c_model, render_env, use_legacy_render)
-render_env.close()
+# ── Hauptprogramm ─────────────────────────────────────────────────────────────
 
-print(f"Episode Reward: {episode_reward}")
-display(Image(filename=gif_path))
+if __name__ == "__main__":
+    # Training
+    env = gym.make("FrozenLake-v1", is_slippery=False)
+    a2c_model = A2CAgentFrozenLake(env)
+    a2c_model.train()
+
+    # GIF aufnehmen
+    try:
+        render_env = gym.make("FrozenLake-v1", is_slippery=False, render_mode="rgb_array")
+        use_legacy_render = False
+    except TypeError:
+        render_env = gym.make("FrozenLake-v1", is_slippery=False)
+        use_legacy_render = True
+
+    gif_path, episode_reward = record_episode(a2c_model, render_env, use_legacy_render)
+    render_env.close()
+
+    print(f"Episode Reward: {episode_reward}")
+    display(Image(filename=gif_path))

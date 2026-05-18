@@ -7,10 +7,11 @@ import numpy as np
 class DynamicsModel(nn.Module):
   def __init__(self):
     super(DynamicsModel, self).__init__()
-    self.layer1 = nn.Linear(6, 64)
-    self.layer2  = nn.Linear(64, 64)
-    self.s_head = nn.Linear(64, 4)
-    self.r_head = nn.Linear(64, 1)
+        self.layer1 = nn.Sequential(nn.Linear(state_dim + action_dim, hidden_dim), nn.ReLU())
+        self.layer2 = nn.Sequential(nn.Linear(hidden_dim, hidden_dim), nn.ReLU())
+        
+        self.s_head = nn.Linear(hidden_dim, state_dim)   
+        self.r_head = nn.Linear(hidden_dim, 1)            
   
   def forward(self,s,a):
     s = F.relu(self.layer1(s))

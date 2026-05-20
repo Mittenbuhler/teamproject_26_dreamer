@@ -24,7 +24,9 @@ class DynamicsModel(nn.Module):
     x = torch.cat([s_t, a_t], dim=-1)
     x = F.relu(self.layer1(x))
     x = F.relu(self.layer2(x))
+    #s_t+1
     s_hat_next = self.s_head(x)
+    #r_t
     r_hat = self.r_head(x)
     return s_hat_next, r_hat
 
@@ -35,13 +37,14 @@ class DynamicsModel(nn.Module):
         s_t1:  nächster State      [batch, 4]
         r_t:   Reward              [batch, 1]
         """
+        #generate s_t+1,r_t
         s_hat_next, r_hat = self.forward(s_t, a_t)
-
+        
+        #MSE
         state_loss  = F.mse_loss(s_hat_next, s_t1)
         reward_loss = F.mse_loss(r_hat, r_t)
 
         return state_loss + reward_loss
-
 
 def collect_transitions(env, n_episodes=200):
     """Sammelt zufällige Erfahrungen (s_t, a_t, s_t+1, r_t)."""
@@ -52,7 +55,8 @@ def collect_transitions(env, n_episodes=200):
         s, _ = env.reset()
         done = False
         while not done:
-            a = env.action_space.sample()                    # zufällige Aktion
+            #zufällige Aktion
+            a = env.action_space.sample()
             s_next, r, terminated, truncated, _ = env.step(a)
             done = terminated or truncated
 
@@ -70,12 +74,13 @@ def collect_transitions(env, n_episodes=200):
 
     return buffer
 
-
 def train(n_training_steps=5000, batch_size=64, lr=1e-3):
+    #initialize env, model, optimizer
     env = gym.make("CartPole-v1")
     model = DynamicsModel(state_dim=4, action_dim=2)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
+    #collect transitions
     print("Sammle Transitionen...")
     buffer = collect_transitions(env, n_episodes=200)
     print(f"Buffer-Größe: {len(buffer)} Transitionen")
@@ -90,8 +95,10 @@ def train(n_training_steps=5000, batch_size=64, lr=1e-3):
         s_next = torch.tensor(np.array(s_next))
         r      = torch.tensor(np.array(r))
 
+        #calcutlate loss
         optimizer.zero_grad()
         l = model.loss(s, a, s_next, r)
+        #update model parameters
         l.backward()
         optimizer.step()
 

@@ -574,31 +574,53 @@ def run_debug_checks(model, batch):
 
 
 # =============================================================================
-# Demo training step
+# Demo online training loop (Dreamer-interleaved loop)
 # =============================================================================
-def demo_train_step():
+def demo_online_train_loop():
     # Create training environment with Gymnasium
     env = gym.make("CartPole-v1")
 
-    # Collect random episodes for a quick smoke test
-    episodes = collect_episodes(env, n_episodes=8, max_steps=50, seed=42)
-    dataset = SequenceDataset(episodes, seq_len=8)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
+    # Dynamic replay buffer to store growing episodes over iterations
+    replay_buffer = []
 
     model = RSSM().to(DEVICE)
-    opt = optim.Adam(model.parameters(), lr=LR)
+    
+    # Use a stable learning rate (e.g., 1e-3) for the online loop
+    # to avoid catastrophic forgetting as the data distribution shifts.
+    opt = optim.Adam(model.parameters(), lr=1e-3)
 
-    # Run debug checks once on a sample sequence to reduce repetitive output
+    # Collect initial seed episodes so the buffer is not empty
+    print("Collecting initial episodes using a random policy...")
+    initial_episodes = collect_episodes(env, n_episodes=6, max_steps=50, seed=42)
+    replay_buffer.extend(initial_episodes)
+
+    # Run debug checks once on an initial sample sequence
     try:
-        sample = dataset[0]
+        temp_dataset = SequenceDataset(replay_buffer, seq_len=8)
+        sample = temp_dataset[0]
         sample = {k: v.to(DEVICE) for k, v in sample.items()}
         run_debug_checks(model, sample)
     except Exception:
-        # If sample-based checks fail for any reason, continue without blocking
         pass
 
-    # Train and print one concise summary per epoch
-    for epoch in range(5):
+    # Global interaction loop (interleaving environment steps and world model updates)
+    for iteration in range(8):
+        print(f"\n--- Global Iteration {iteration:02d} ---")
+        
+        # Step A: Online interaction (collect new trajectories dynamically)
+        # Note: Once implemented, the learned actor policy would be used here instead of random samples.
+        new_episodes = collect_episodes(env, n_episodes=2, max_steps=50)
+        replay_buffer.extend(new_episodes)
+        
+        # Optional: limit replay buffer capacity (e.g., keep the last 60 episodes)
+        if len(replay_buffer) > 60:
+            replay_buffer = replay_buffer[-60:]
+
+        # Step B: Recreate dataset from the updated replay buffer
+        dataset = SequenceDataset(replay_buffer, seq_len=8)
+        loader = torch.utils.data.DataLoader(dataset, batch_size=4, shuffle=True)
+
+        # Step C: World model training (1 epoch of optimization over the current buffer content)
         agg = {}
         count = 0
         for batch in loader:
@@ -628,9 +650,10 @@ def demo_train_step():
         else:
             avg = agg
 
-        # Concise epoch summary
+        # Print iteration summary
         summary = (
-            f"Epoch {epoch}: total_loss={avg.get('total_loss', float('nan')):.3f}, "
+            f"Iteration {iteration:02d} | Buffer Size: {len(replay_buffer):2d} Eps | "
+            f"total_loss={avg.get('total_loss', float('nan')):.3f}, "
             f"reward_mse={avg.get('reward_mse', float('nan')):.3f}, "
             f"continue_prob={avg.get('continue_prob_mean', float('nan')):.3f}, "
             f"continue_acc={avg.get('continue_acc', float('nan')):.3f}, "
@@ -638,10 +661,12 @@ def demo_train_step():
         )
         print(summary)
 
-        # Single prior rollout check per epoch
+        # Single prior rollout check (imagination test) per iteration using fresh data
         try:
+            sample = dataset[0]
+            sample = {k: v.to(DEVICE) for k, v in sample.items()}
             pred = model.prior_rollout(sample['observations'], sample['actions'], warmup_steps=4)
-            print(f"Prior rollout: {pred.shape}")
+            print(f"  -> Prior rollout shape: {pred.shape}")
         except Exception:
             pass
 
@@ -649,4 +674,4 @@ def demo_train_step():
 
 
 if __name__ == "__main__":
-    demo_train_step()
+    demo_online_train_loop()

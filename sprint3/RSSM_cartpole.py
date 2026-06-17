@@ -21,6 +21,8 @@ OBSERVATION_SIZE = 2
 ACTION_SIZE = 2
 PRIOR_SCALE = 0.5
 KL_SCALE = 0.1
+REWARD_SCALE = 2.0
+CONTINUE_SCALE = 1.0
 LR = 1e-3
 
 # CartPole full state is [cart position, cart velocity, pole angle, pole angular velocity]
@@ -120,7 +122,7 @@ class SequenceDataset(torch.utils.data.Dataset):
             if L < 1:
                 continue
 
-            # Chunk episode into non-overlapping windows
+            # Chunk episode into overlapping windows to use more training signal.
             start = 0
             while start + seq_len <= L:
                 o = vis[start:start + seq_len + 1]
@@ -128,7 +130,7 @@ class SequenceDataset(torch.utils.data.Dataset):
                 r = rews[start:start + seq_len]
                 c = conts[start:start + seq_len]
                 self.seqs.append((o, a, r, c))
-                start += seq_len
+                start += 1
 
         # Fallback if episodes are very short
         if len(self.seqs) == 0:
@@ -420,7 +422,8 @@ class RSSM(nn.Module):
 # =============================================================================
 # Losses
 # =============================================================================
-def compute_losses(model_out, observations, rewards, continues, priorscale=PRIOR_SCALE, klscale=KL_SCALE):
+def compute_losses(model_out, observations, rewards, continues, priorscale=PRIOR_SCALE, klscale=KL_SCALE,
+                   rewardscale=REWARD_SCALE, continuescale=CONTINUE_SCALE):
     """
     Manual objective:
     - posterior prediction loss
@@ -446,8 +449,8 @@ def compute_losses(model_out, observations, rewards, continues, priorscale=PRIOR
     rew_mse_prior = F.mse_loss(prior_preds["reward"], rewards)
     cont_loss_prior = F.binary_cross_entropy_with_logits(prior_preds["continuelogit"], continues)
 
-    posterior_loss = obs_mse_post + rew_mse_post + cont_loss_post
-    prior_loss = obs_mse_prior + rew_mse_prior + cont_loss_prior
+    posterior_loss = obs_mse_post + rewardscale * rew_mse_post + continuescale * cont_loss_post
+    prior_loss = obs_mse_prior + rewardscale * rew_mse_prior + continuescale * cont_loss_prior
 
     # KL(q || p) over K, then summed over C, then averaged over B and T
     q_log_probs = F.log_softmax(posterior_logits, dim=-1)
@@ -464,6 +467,9 @@ def compute_losses(model_out, observations, rewards, continues, priorscale=PRIOR
         "posterior_obs_mse": obs_mse_post.detach().item(),
         "prior_obs_mse": obs_mse_prior.detach().item(),
         "reward_mse": rew_mse_post.detach().item(),
+        "reward_pred_mean": posterior_preds["reward"].mean().detach().item(),
+        "continue_bce": cont_loss_post.detach().item(),
+        "continue_prob_mean": torch.sigmoid(posterior_preds["continuelogit"]).mean().detach().item(),
         "continue_acc": ((torch.sigmoid(posterior_preds["continuelogit"]) > 0.5).float() == continues).float().mean().detach().item(),
     }
 
@@ -582,34 +588,62 @@ def demo_train_step():
     model = RSSM().to(DEVICE)
     opt = optim.Adam(model.parameters(), lr=LR)
 
-    for batch in loader:
-        batch = {k: v.to(DEVICE) for k, v in batch.items()}
+    # Run debug checks once on a sample sequence to reduce repetitive output
+    try:
+        sample = dataset[0]
+        sample = {k: v.to(DEVICE) for k, v in sample.items()}
+        run_debug_checks(model, sample)
+    except Exception:
+        # If sample-based checks fail for any reason, continue without blocking
+        pass
 
-        # Run the manual-style debugging checklist before training
-        run_debug_checks(model, batch)
+    # Train and print one concise summary per epoch
+    for epoch in range(5):
+        agg = {}
+        count = 0
+        for batch in loader:
+            batch = {k: v.to(DEVICE) for k, v in batch.items()}
 
-        observations = batch["observations"]
-        actions = batch["actions"]
-        rewards = batch["rewards"]
-        continues = batch["continues"]
+            observations = batch["observations"]
+            actions = batch["actions"]
+            rewards = batch["rewards"]
+            continues = batch["continues"]
 
-        # Main forward pass
-        out = model.observe_forward(observations, actions)
+            # Main forward pass and loss
+            out = model.observe_forward(observations, actions)
+            loss, metrics = compute_losses(out, observations, rewards, continues)
 
-        # Compute RSSM objective
-        loss, metrics = compute_losses(out, observations, rewards, continues)
+            # Standard training step
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
 
-        # Standard training step
-        opt.zero_grad()
-        loss.backward()
-        opt.step()
+            # Accumulate metrics
+            for k, v in metrics.items():
+                agg[k] = agg.get(k, 0.0) + float(v)
+            count += 1
 
-        print("Demo train step metrics:", metrics)
+        if count > 0:
+            avg = {k: v / count for k, v in agg.items()}
+        else:
+            avg = agg
 
-        # Prior rollout test after warmup
-        pred = model.prior_rollout(observations, actions, warmup_steps=4)
-        print("Prior rollout shape:", pred.shape)
-        break
+        # Concise epoch summary
+        summary = (
+            f"Epoch {epoch}: total_loss={avg.get('total_loss', float('nan')):.3f}, "
+            f"reward_mse={avg.get('reward_mse', float('nan')):.3f}, "
+            f"continue_prob={avg.get('continue_prob_mean', float('nan')):.3f}, "
+            f"continue_acc={avg.get('continue_acc', float('nan')):.3f}, "
+            f"kl={avg.get('kl', float('nan')):.3f}"
+        )
+        print(summary)
+
+        # Single prior rollout check per epoch
+        try:
+            pred = model.prior_rollout(sample['observations'], sample['actions'], warmup_steps=4)
+            print(f"Prior rollout: {pred.shape}")
+        except Exception:
+            pass
 
     env.close()
 

@@ -42,6 +42,7 @@ function observe_forward(observations, actions):
     h, z = 0, 0   # Initialzustand
 
     for t in 0..T-1:
+    
         # 1) Aktion + voriges Latent → Feature
         feat = MLP_action(concat(z, action[t]))
 

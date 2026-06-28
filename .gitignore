@@ -9,3 +9,15 @@ example_code/__pycache__/test_cartpole_a2c.cpython-313-pytest-8.3.5.pyc
 example_code/__pycache__/test_cartpole_a2c.cpython-313-pytest-9.0.3.pyc
 example_code/__pycache__/CartPoleA2C_test.cpython-313-pytest-8.3.5.pyc
 sprint2/dynamics_model_local.py
+cartpole_frames.png
+decoder_mse_scores.png
+dreamer_sprint4.pt
+latent_pca.png
+prior_rollout.png
+reconstruction.png
+example_code/__pycache__/FrozenLakeA2C_test.cpython-313-pytest-9.0.3.pyc
+example_code/__pycache__/FrozenLakeA2C.cpython-313.pyc
+sprint4/__pycache__/CartPole.cpython-313.pyc
+sprint4/__pycache__/Decoder.cpython-313.pyc
+sprint4/__pycache__/Encoder.cpython-313.pyc
+sprint4/__pycache__/RSSM_cartpole.cpython-313.pyc

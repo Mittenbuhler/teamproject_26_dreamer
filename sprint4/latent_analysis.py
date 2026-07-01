@@ -99,95 +99,112 @@ def extract_latents(model: RSSM, episodes: list[dict]) -> tuple[np.ndarray, np.n
 # =============================================================================
 
 class LatentDecoderNN(nn.Module):
-    """
-    Ein neuronales Netzwerk zur Decodierung des Latent-Spaces in CartPole-Zustände.
-    Nutzt standardmäßig ein lineares Layer (nn.Linear) analog zu einer Linearen Probe.
-    """
     def __init__(self, input_dim: int, output_dim: int = 4):
         super().__init__()
-        # Mappt den Latent Space (z.B. 320 Dimensionen) auf die 4 CartPole-Werte
-        self.decoder = nn.Linear(input_dim, output_dim)
+        # Ein kleines MLP statt einer rein linearen Schicht
+        self.decoder = nn.Sequential(
+            nn.Linear(input_dim, 128),
+            nn.ReLU(),
+            nn.Linear(128, output_dim)
+        )
         
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.decoder(x)
 
 
-def train_and_evaluate_decoder(latents: np.ndarray, true_states: np.ndarray, 
+def train_and_evaluate_decoder(latents: np.ndarray, true_states: np.ndarray,
                                epochs: int = 60, batch_size: int = 64, lr: float = 1e-3):
     """
-    Trainiert den PyTorch-NN-Decoder mittels MSE-Verlust auf einem Train-Test-Split
-    und gibt den finalen MSE für jede einzelne Zustandsvariable aus.
+    Trainiert den PyTorch-NN-Decoder mittels MSE-Verlust auf einem Train-Test-Split.
+
+    Gibt sowohl den rohen MSE als auch den normalisierten MSE (NMSE) zurück.
+
+    NMSE = MSE / Var(y)
+      Ein NMSE nahe 0 bedeutet: der Latentvektor erklärt die Variable fast perfekt.
+      Ein NMSE nahe 1 bedeutet: der Decoder ist nicht besser als der Mittelwert.
+      Ein NMSE > 1 bedeutet: der Decoder ist schlechter als der triviale Baseline.
+
+    Warum normalisieren? Position bewegt sich in [-2.4, 2.4], Winkelgeschwindigkeit
+    kann Werte bis ±10 annehmen. Ohne Normalisierung dominiert die Variable mit
+    der größten Varianz den MSE-Vergleich, obwohl der Decoder sie vielleicht
+    genauso gut (relativ) vorhersagt.
     """
     print("\n--- Training des PyTorch NN-Decoders (Latent Space -> 4 State-Werte) ---")
-    
-    # Train-Test-Split (80% / 20%)
+
     n_samples = len(latents)
     n_train = int(0.8 * n_samples)
-    
+
     X_train_raw = torch.tensor(latents[:n_train], dtype=torch.float32)
-    y_train = torch.tensor(true_states[:n_train], dtype=torch.float32)
-    X_test_raw = torch.tensor(latents[n_train:], dtype=torch.float32)
-    y_test = torch.tensor(true_states[n_train:], dtype=torch.float32)
+    y_train_raw = torch.tensor(true_states[:n_train], dtype=torch.float32)
+    X_test_raw  = torch.tensor(latents[n_train:],  dtype=torch.float32)
+    y_test_raw  = torch.tensor(true_states[n_train:], dtype=torch.float32)
 
-    # Standardisierung der Eingangs-Features für stabileres NN-Training
+    # Input-Standardisierung (stabileres Training)
     X_mean = X_train_raw.mean(dim=0, keepdim=True)
-    X_std = X_train_raw.std(dim=0, keepdim=True) + 1e-8
+    X_std  = X_train_raw.std(dim=0, keepdim=True) + 1e-8
     X_train = (X_train_raw - X_mean) / X_std
-    X_test = (X_test_raw - X_mean) / X_std
+    X_test  = (X_test_raw  - X_mean) / X_std
 
-    # Daten-Loader vorbereiten
+    # Target-Standardisierung: Decoder lernt z-Scores, MSE wird danach zurück-skaliert.
+    # Das verhindert, dass Variablen mit großem Wertebereich den Loss dominieren.
+    y_mean = y_train_raw.mean(dim=0, keepdim=True)
+    y_std  = y_train_raw.std(dim=0, keepdim=True) + 1e-8
+    y_train = (y_train_raw - y_mean) / y_std
+    y_test  = (y_test_raw  - y_mean) / y_std
+
     dataset = torch.utils.data.TensorDataset(X_train, y_train)
-    loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+    loader  = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-    # Modell, Optimizer und Loss initialisieren
     input_dim = X_train.shape[1]
-    model = LatentDecoderNN(input_dim=input_dim).to(DEVICE)
+    model     = LatentDecoderNN(input_dim=input_dim).to(DEVICE)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = nn.MSELoss()  # Wie gewünscht: Evaluation via Mean Squared Error
+    criterion = nn.MSELoss()
 
-    # Trainings-Loop
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
         for batch_X, batch_y in loader:
             batch_X, batch_y = batch_X.to(DEVICE), batch_y.to(DEVICE)
-            
             preds = model(batch_X)
-            loss = criterion(preds, batch_y)
-            
+            loss  = criterion(preds, batch_y)
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
-            
             epoch_loss += loss.item() * batch_X.size(0)
-        
         if epoch % 20 == 0 or epoch == 1:
-            print(f"  Epoche {epoch:02d}/{epochs} | Train-MSE: {epoch_loss / n_train:.6f}")
+            print(f"  Epoche {epoch:02d}/{epochs} | Train-MSE (normalisiert): {epoch_loss / n_train:.6f}")
 
-    # Evaluierung auf dem Test-Set
     model.eval()
     with torch.no_grad():
-        X_test, y_test = X_test.to(DEVICE), y_test.to(DEVICE)
-        test_preds = model(X_test)
-        
-        total_test_mse = criterion(test_preds, y_test).item()
-        # Einzelne MSEs pro Variable berechnen
-        mse_per_variable = ((test_preds - y_test) ** 2).mean(dim=0).cpu().numpy()
+        X_test_dev = X_test.to(DEVICE)
+        y_test_dev = y_test.to(DEVICE)
+        test_preds_norm = model(X_test_dev)  # Vorhersagen im z-Score-Raum
+
+        # MSE im normalisierten Raum (NMSE — direkt vergleichbar zwischen Variablen)
+        nmse_per_var = ((test_preds_norm - y_test_dev) ** 2).mean(dim=0).cpu().numpy()
+
+        # Zurück in originale Einheiten: MSE_orig = NMSE * Var(y)
+        y_std_np  = y_std.squeeze().numpy()
+        mse_per_var = nmse_per_var * (y_std_np ** 2)
+
+        # Varianz der Zielvariablen (im Originalraum) als Baseline
+        var_per_var = (y_std_np ** 2)
 
     print("\n>>> FINALE MSE EVALUIERUNG (Test-Set) <<<")
-    print(f"  Gesamt-MSE über alle Variablen: {total_test_mse:.6f}")
-    print("-" * 50)
-    
-    mse_dict = {}
+    print(f"{'Variable':<22}  {'MSE (orig.)':<14}  {'Varianz':<14}  {'NMSE':<8}  Güte")
+    print("-" * 72)
+
+    results = {}
     for i, name in enumerate(STATE_NAMES):
-        var_mse = mse_per_variable[i]
-        mse_dict[name] = var_mse
-        # Visueller Balken im Terminal (je kürzer, desto besser!)
-        bar_len = max(1, int((1.0 - min(var_mse, 1.0)) * 30))
-        bar = "█" * bar_len
-        print(f"  {name:<22} | MSE = {var_mse:.6f}   {bar}")
-        
-    return mse_dict
+        mse  = mse_per_var[i]
+        var  = var_per_var[i]
+        nmse = nmse_per_var[i]
+        # NMSE: 0=perfekt, 1=Mittelwert-Baseline, >1=schlechter als trivial
+        guete = "★★★" if nmse < 0.1 else "★★ " if nmse < 0.3 else "★  " if nmse < 0.7 else "   "
+        print(f"  {name:<20}  MSE={mse:.5f}  Var={var:.5f}  NMSE={nmse:.4f}  {guete}")
+        results[name] = {"mse": mse, "nmse": nmse, "var": var}
+
+    return results
 
 
 # =============================================================================
@@ -195,20 +212,38 @@ def train_and_evaluate_decoder(latents: np.ndarray, true_states: np.ndarray,
 # =============================================================================
 
 def plot_mse_bars(mse_results: dict, save_path: str = "decoder_mse_scores.png"):
-    """Erstellt ein Balkendiagramm der MSE-Fehler für die 4 Variablen."""
-    names = list(mse_results.keys())
-    mse_vals = list(mse_results.values())
+    """
+    Zwei Plots nebeneinander: roher MSE (absolute Einheiten) und NMSE (normalisiert).
+    NMSE ist der faire Vergleich zwischen Variablen mit unterschiedlichen Wertebereichen.
+    """
+    names     = list(mse_results.keys())
+    mse_vals  = [mse_results[n]["mse"]  for n in names]
+    nmse_vals = [mse_results[n]["nmse"] for n in names]
 
-    fig, ax = plt.subplots(figsize=(8, 4))
-    bars = ax.barh(names, mse_vals, color="#3498db", edgecolor="white", height=0.5)
-    ax.axvline(0, color="black", linewidth=0.8)
-    ax.set_xlabel("Mean Squared Error (MSE) - Je niedriger desto besser")
-    ax.set_title("CartPole-Zustandsrekonstruktion via PyTorch NN-Decoder", fontweight="bold")
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 4))
 
-    for bar, v in zip(bars, mse_vals):
-        ax.text(v + (max(mse_vals)*0.01), bar.get_y() + bar.get_height() / 2,
-                f"{v:.5f}", va="center", fontsize=10, fontweight="bold")
+    # --- Linker Plot: Roher MSE ---
+    ax1.barh(names, mse_vals, color="#3498db", edgecolor="white", height=0.5)
+    ax1.axvline(0, color="black", linewidth=0.8)
+    ax1.set_xlabel("MSE (originale Einheiten)")
+    ax1.set_title("Roher MSE\n(nicht direkt vergleichbar!)", fontweight="bold")
+    for i, v in enumerate(mse_vals):
+        ax1.text(v + max(mse_vals) * 0.01, i, f"{v:.5f}", va="center", fontsize=9)
 
+    # --- Rechter Plot: NMSE ---
+    colors = ["#2ecc71" if v < 0.1 else "#f39c12" if v < 0.3 else "#e74c3c"
+              for v in nmse_vals]
+    ax2.barh(names, nmse_vals, color=colors, edgecolor="white", height=0.5)
+    ax2.axvline(0,   color="black", linewidth=0.8)
+    ax2.axvline(1.0, color="red",   linewidth=1.2, linestyle="--", alpha=0.6,
+                label="NMSE=1 (Mittelwert-Baseline)")
+    ax2.set_xlabel("NMSE = MSE / Var(y)   |   0=perfekt, 1=triviale Baseline")
+    ax2.set_title("Normalisierter MSE (NMSE)\n(fair vergleichbar zwischen Variablen)", fontweight="bold")
+    ax2.legend(fontsize=8)
+    for i, v in enumerate(nmse_vals):
+        ax2.text(v + 0.01, i, f"{v:.4f}", va="center", fontsize=9)
+
+    plt.suptitle("Latent-Space Decoder — Zustandsrekonstruktion", fontsize=12, fontweight="bold")
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
     plt.close()

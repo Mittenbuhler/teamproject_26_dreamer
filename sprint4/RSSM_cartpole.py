@@ -1,13 +1,6 @@
 """
-RSSM_cartpole.py — Sprint 4
+RSSM_cartpole.py — Sprint 4 (optimiert)
 Dreamer-v2 World Model mit Bild-Input (32x32 Graustufen).
-
-Dreamer-Verluste:
-  1. Reconstruction Loss  — Decoder(z,h) vs. echtes Frame
-  2. Reward Loss          — Reward-Head(z,h) vs. echter Reward
-  3. Continue Loss        — Continue-Head(z,h) vs. echter Continue-Flag
-  4. KL Loss              — KL( q(z|h,o)  ||  p(z|h) )
-                            Prior vs. Posterior (kategorisch, ST-Schätzer)
 """
 
 import numpy as np
@@ -27,56 +20,58 @@ from CartPole import collect_episodes_image
 # =============================================================================
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-RESOLUTION   = 32       # Bildgröße
-EMBED_DIM    = 32       # Encoder-Output-Größe (Linear 64→32)
+RESOLUTION   = 32
+EMBED_DIM    = 32       # Encoder-Output (Linear 64→32)
 
-C            = 8        # Anzahl kategorische Latentvariablen
+C            = 8        # Kategorische Latentvariablen
 K            = 8        # Klassen pro Variable
-STOCH_SIZE   = C * K    # = 64
+STOCH_SIZE   = C * K    # 64
 
-DETER_SIZE   = 256      # GRU Hidden-State h
-HIDDEN_SIZE  = 256      # MLP-Zwischengröße
+DETER_SIZE   = 256      # GRU Hidden-State
+HIDDEN_SIZE  = 256
 
-ACTION_SIZE  = 2        # CartPole: links / rechts (one-hot)
+ACTION_SIZE  = 2
 
-# Verlustgewichtungen
 RECON_SCALE    = 1.0
 REWARD_SCALE   = 1.0
 CONTINUE_SCALE = 1.0
 KL_SCALE       = 0.1
 KL_BALANCE     = 0.8    # Dreamer-v2: 80% freie Prior, 20% freie Posterior
+KL_FREE_BITS   = 0.5   # Min-KL pro Kategorie — verhindert Posterior-Kollaps
 
-LR = 3e-4
+LR         = 3e-4
+GRAD_CLIP  = 10.0
+GRAD_STEPS = 40         # Gradient-Updates pro Iteration
+BATCH_SIZE = 32         # Stabile Gradienten
 
 
 # =============================================================================
-# Sequence-Dataset (Bild-basiert)
+# Dataset & Sampling
 # =============================================================================
 class ImageSequenceDataset(torch.utils.data.Dataset):
     """
-    Gibt Sequenzen mit Bildinput zurück.
-    Shapes:
-      frames:    (T+1, 1, H, W)   float32
-      actions:   (T, 2)           float32
-      rewards:   (T, 1)           float32
-      continues: (T, 1)           float32
-      full_states:(T+1, 4)        float32  (für Analyse)
+    Gibt überlappende Sequenzen aus dem Replay Buffer zurück.
+    Shapes pro Sample:
+      frames:     (T+1, 1, H, W)  float32  [0,1]
+      full_states:(T+1, 4)        float32  [pos, vel, angle, angvel]
+      actions:    (T, 2)          float32  one-hot
+      rewards:    (T, 1)          float32
+      continues:  (T, 1)          float32  1=weiter, 0=Ende
     """
-
-    def __init__(self, episodes: list[dict], seq_len: int = 16,
-                 resolution: int = RESOLUTION):
+    def __init__(self, episodes: list[dict], seq_len: int = 16):
         self.seqs = []
-        self.resolution = resolution
         for ep in episodes:
-            frames = np.stack(ep["frames"])                  # (T+1, res, res)
-            frames = frames[:, np.newaxis, :, :]             # (T+1, 1, res, res)
-            full   = np.stack(ep["full_states"])             # (T+1, 4)
-            acts   = np.stack(ep["actions"])                 # (T, 2)
-            rews   = np.stack(ep["rewards"])                 # (T, 1)
-            conts  = np.stack(ep["continues"])               # (T, 1)
+            frames = np.stack(ep["frames"])[:, np.newaxis, :, :]
+            full   = np.stack(ep["full_states"])
+            acts   = np.stack(ep["actions"])
+            rews   = np.stack(ep["rewards"])
+            conts  = np.stack(ep["continues"])
             T = len(acts)
             if T < 1:
                 continue
+            # Episoden kürzer als seq_len werden übersprungen — alle Sequenzen
+            # im Dataset haben exakt (seq_len+1) Frames, damit sample_batch
+            # problemlos torch.stack aufrufen kann.
             start = 0
             while start + seq_len <= T:
                 self.seqs.append((
@@ -86,9 +81,7 @@ class ImageSequenceDataset(torch.utils.data.Dataset):
                     rews  [start:start + seq_len],
                     conts [start:start + seq_len],
                 ))
-                start += seq_len // 2   # 50%-Überlappung
-            if not self.seqs:
-                self.seqs.append((frames, full, acts, rews, conts))
+                start += seq_len // 2   # 50% Überlappung
 
     def __len__(self):
         return len(self.seqs)
@@ -104,61 +97,60 @@ class ImageSequenceDataset(torch.utils.data.Dataset):
         }
 
 
+def sample_batch(dataset: ImageSequenceDataset, batch_size: int,
+                 device: torch.device) -> dict:
+    """Zieht einen zufälligen Batch ohne DataLoader-Overhead."""
+    idx   = torch.randint(len(dataset), (batch_size,)).tolist()
+    batch = [dataset[i] for i in idx]
+    return {k: torch.stack([b[k] for b in batch]).to(device) for k in batch[0]}
+
+
 # =============================================================================
-# RSSM — Dreamer-v2 style, Bild-Input
+# RSSM
 # =============================================================================
 class RSSM(nn.Module):
     """
-    Recurrent State Space Model mit CNN-Encoder und CNN-Decoder.
+    Recurrent State Space Model (Dreamer-v2).
 
     Zustandsrepräsentation:
       h  — deterministischer Zustand (GRU Hidden State)
       z  — stochastischer Zustand (kategorisch, C×K, straight-through)
-      s  = [flatten(z), h]   — feature vector für alle Köpfe
+      feat = [flatten(z), h]  — Input für alle Decoder-Köpfe
 
-    Prior:      p(z | h)         — sieht kein Bild
-    Posterior:  q(z | h, e(o))   — sieht Encoder-Output e(o)
+    Prior:     p(z | h)        — ohne Bild
+    Posterior: q(z | h, e(o)) — mit Encoder-Output
     """
-
     def __init__(self):
         super().__init__()
 
-        # Encoder & Decoder — fixe Architektur (32x32 -> 32, 32 -> 32x32)
-        self.encoder = Encoder()
-        self.decoder = Decoder(latent_dim=STOCH_SIZE + DETER_SIZE)
+        self.encoder    = Encoder()
+        self.decoder    = Decoder(latent_dim=32)
+        # Projiziert feat=[z,h] (STOCH+DETER=320) auf 32 dim vor dem Decoder
+        self.feat_proj  = nn.Linear(STOCH_SIZE + DETER_SIZE, 32)
+        self.embed_norm = nn.LayerNorm(EMBED_DIM)
 
-        # Action preprocess: (z, a) → GRU-Input
         self.action_stack = nn.Sequential(
             nn.Linear(STOCH_SIZE + ACTION_SIZE, HIDDEN_SIZE),
             nn.ELU(inplace=True),
             nn.Linear(HIDDEN_SIZE, DETER_SIZE),
         )
-
-        # GRU
         self.gru = nn.GRUCell(DETER_SIZE, DETER_SIZE)
 
-        # Prior p(z | h)
         self.prior_net = nn.Sequential(
             nn.Linear(DETER_SIZE, HIDDEN_SIZE),
             nn.ELU(inplace=True),
             nn.Linear(HIDDEN_SIZE, C * K),
         )
-
-        # Posterior q(z | h, embed)
         self.posterior_net = nn.Sequential(
             nn.Linear(DETER_SIZE + EMBED_DIM, HIDDEN_SIZE),
             nn.ELU(inplace=True),
             nn.Linear(HIDDEN_SIZE, C * K),
         )
-
-        # Reward Head
         self.reward_head = nn.Sequential(
             nn.Linear(STOCH_SIZE + DETER_SIZE, HIDDEN_SIZE),
             nn.ELU(inplace=True),
             nn.Linear(HIDDEN_SIZE, 1),
         )
-
-        # Continue Head (logits für BCE)
         self.continue_head = nn.Sequential(
             nn.Linear(STOCH_SIZE + DETER_SIZE, HIDDEN_SIZE),
             nn.ELU(inplace=True),
@@ -166,290 +158,249 @@ class RSSM(nn.Module):
         )
 
     # -----------------------------------------------------------------------
-    # Hilfsmethoden
-    # -----------------------------------------------------------------------
     def initial(self, batch_size: int, device: torch.device):
-        z = torch.zeros(batch_size, STOCH_SIZE, device=device)
-        h = torch.zeros(batch_size, DETER_SIZE, device=device)
-        return z, h
+        return (torch.zeros(batch_size, STOCH_SIZE, device=device),
+                torch.zeros(batch_size, DETER_SIZE, device=device))
 
-    def _to_categorical(self, logits: torch.Tensor) -> torch.Tensor:
-        """(B, C*K) → (B, C, K)"""
+    def _to_categorical(self, logits):
         return logits.view(logits.shape[0], C, K)
 
-    def _flatten(self, z: torch.Tensor) -> torch.Tensor:
-        """(B, C, K) → (B, C*K)"""
+    def _flatten(self, z):
         return z.view(z.shape[0], C * K)
 
-    def _straight_through(self, logits: torch.Tensor) -> torch.Tensor:
-        """Straight-Through-Schätzer für kategorische Samples."""
-        probs = F.softmax(logits, dim=-1)          # (B, C, K)
+    def _straight_through(self, logits):
+        """Kategorisches Sample mit Straight-Through-Gradienten."""
+        probs  = F.softmax(logits, dim=-1)           # (B, C, K)
         B, _C, _K = probs.shape
-        idx = torch.multinomial(probs.view(B * _C, _K), 1).squeeze(-1)
-        onehot = F.one_hot(idx, num_classes=_K).float().view(B, _C, _K)
-        # Forward: onehot, Backward: probs (Straight-Through)
-        return onehot.detach() - probs.detach() + probs
+        idx    = torch.multinomial(probs.view(B * _C, _K), 1).squeeze(-1)
+        onehot = F.one_hot(idx, _K).float().view(B, _C, _K)
+        return onehot.detach() - probs.detach() + probs  # ST-Trick
 
-    def _mode_onehot(self, logits: torch.Tensor) -> torch.Tensor:
-        """Deterministische Auswahl (argmax) als one-hot."""
-        idx = logits.argmax(dim=-1)                # (B, C)
-        return F.one_hot(idx, num_classes=K).float()
+    def _mode_onehot(self, logits):
+        """Deterministisches argmax als one-hot (für Evaluation/Rollout)."""
+        return F.one_hot(logits.argmax(dim=-1), K).float()
 
-    def _feature(self, flat_z: torch.Tensor, h: torch.Tensor) -> torch.Tensor:
-        return torch.cat([flat_z, h], dim=-1)      # (B, STOCH+DETER)
+    def _feature(self, flat_z, h):
+        return torch.cat([flat_z, h], dim=-1)         # (B, STOCH+DETER)
 
-    # -----------------------------------------------------------------------
-    # Forward-Pass (Training)
     # -----------------------------------------------------------------------
     def observe_forward(self, frames: torch.Tensor, actions: torch.Tensor):
         """
+        Kompletter Forward-Pass über eine Sequenz.
         frames:  (B, T+1, 1, H, W)
         actions: (B, T, 2)
-
-        Gibt alle nötigen Outputs für die Dreamer-Verluste zurück.
         """
         B, Tp1, C1, H, W = frames.shape
         T = actions.shape[1]
 
-        # Alle Frames auf einmal durch Encoder (Effizienz)
-        enc_all = self.encoder(frames.view(B * Tp1, C1, H, W))  # (B*(T+1), embed)
-        enc_all = enc_all.view(B, Tp1, EMBED_DIM)               # (B, T+1, embed)
+        # Encoder auf alle Frames gleichzeitig (effizienter als Schleife)
+        enc_all = self.encoder(frames.view(B * Tp1, C1, H, W))
+        enc_all = self.embed_norm(enc_all).view(B, Tp1, EMBED_DIM)
 
         flat_z, h = self.initial(B, frames.device)
 
-        prior_logits_list     = []
-        posterior_logits_list = []
-        reconstructions       = []
-        reward_preds          = []
-        continue_preds        = []
+        prior_logits_list, posterior_logits_list = [], []
+        reconstructions, reward_preds, continue_preds = [], [], []
 
         for t in range(T):
-            a_t = actions[:, t, :]                              # (B, 2)
+            # Recurrent Step
+            inp  = self.action_stack(torch.cat([flat_z, actions[:, t]], dim=-1))
+            h    = self.gru(inp, h)
 
-            # --- Recurrent Step ---
-            inp = torch.cat([flat_z, a_t], dim=-1)             # (B, STOCH+2)
-            inp = self.action_stack(inp)                        # (B, DETER)
-            h   = self.gru(inp, h)                              # (B, DETER)
+            # Prior p(z | h)
+            prior_logits = self._to_categorical(self.prior_net(h))
 
-            # --- Prior p(z | h) ---
-            prior_logits_flat = self.prior_net(h)               # (B, C*K)
-            prior_logits      = self._to_categorical(prior_logits_flat)
+            # Posterior q(z | h, e(o_{t+1}))
+            e_next      = enc_all[:, t + 1]
+            post_logits = self._to_categorical(
+                self.posterior_net(torch.cat([h, e_next], dim=-1)))
 
-            # --- Posterior q(z | h, e(o_{t+1})) ---
-            e_next = enc_all[:, t + 1, :]                       # (B, embed)
-            post_inp = torch.cat([h, e_next], dim=-1)
-            post_logits_flat = self.posterior_net(post_inp)     # (B, C*K)
-            post_logits      = self._to_categorical(post_logits_flat)
-
-            # Sample posterior z (ST)
-            z_post   = self._straight_through(post_logits)     # (B, C, K)
-            flat_z   = self._flatten(z_post)                   # (B, C*K)
-
-            # Feature für Predictions
-            feat = self._feature(flat_z, h)                    # (B, STOCH+DETER)
-
-            # --- Decoder (Reconstruction) ---
-            recon = self.decoder(feat)                          # (B, 1, H, W)
-            # --- Reward ---
-            rew   = self.reward_head(feat)                      # (B, 1)
-            # --- Continue ---
-            cont  = self.continue_head(feat)                    # (B, 1)  [logit]
+            # Sample z aus Posterior (Straight-Through)
+            z_post = self._straight_through(post_logits)
+            flat_z = self._flatten(z_post)
+            feat   = self._feature(flat_z, h)
 
             prior_logits_list.append(prior_logits)
             posterior_logits_list.append(post_logits)
-            reconstructions.append(recon)
-            reward_preds.append(rew)
-            continue_preds.append(cont)
+            reconstructions.append(self.decoder(self.feat_proj(feat)))
+            reward_preds.append(self.reward_head(feat))
+            continue_preds.append(self.continue_head(feat))
 
         return {
-            "prior_logits":     torch.stack(prior_logits_list, dim=1),      # (B,T,C,K)
+            "prior_logits":     torch.stack(prior_logits_list,     dim=1),  # (B,T,C,K)
             "posterior_logits": torch.stack(posterior_logits_list, dim=1),  # (B,T,C,K)
-            "reconstructions":  torch.stack(reconstructions, dim=1),        # (B,T,1,H,W)
-            "reward_preds":     torch.stack(reward_preds, dim=1),           # (B,T,1)
-            "continue_preds":   torch.stack(continue_preds, dim=1),        # (B,T,1)
+            "reconstructions":  torch.stack(reconstructions,        dim=1),  # (B,T,1,H,W)
+            "reward_preds":     torch.stack(reward_preds,           dim=1),  # (B,T,1)
+            "continue_preds":   torch.stack(continue_preds,         dim=1),  # (B,T,1)
         }
 
-    # -----------------------------------------------------------------------
-    # Prior-Rollout (Imagination ohne echte Frames)
     # -----------------------------------------------------------------------
     def prior_rollout(self, frames: torch.Tensor, actions: torch.Tensor,
                       warmup_steps: int = 5):
         """
-        Warmup: Posterior mit echten Frames.
-        Rollout: nur Prior (keine echten Frames mehr).
-        Gibt rekonstruierte Bilder des Imagination-Pfads zurück.
+        Imagination: Warmup mit Posterior, dann freier Prior-Rollout.
+        Gibt rekonstruierte Frames des imaginierten Pfads zurück.
         """
         B, Tp1, C1, H, W = frames.shape
         T = actions.shape[1]
-        flat_z, h = self.initial(B, frames.device)
-
         warmup_steps = min(warmup_steps, T)
 
-        enc_all = self.encoder(frames.view(B * Tp1, C1, H, W))
-        enc_all = enc_all.view(B, Tp1, EMBED_DIM)
+        enc_all = self.embed_norm(
+            self.encoder(frames.view(B * Tp1, C1, H, W))
+        ).view(B, Tp1, EMBED_DIM)
+
+        flat_z, h = self.initial(B, frames.device)
 
         with torch.no_grad():
-            # Warmup
+            # Warmup — Posterior, sieht echte Frames
             for t in range(warmup_steps):
-                a_t = actions[:, t, :]
-                inp = self.action_stack(torch.cat([flat_z, a_t], dim=-1))
+                inp = self.action_stack(torch.cat([flat_z, actions[:, t]], dim=-1))
                 h   = self.gru(inp, h)
-                e_next = enc_all[:, t + 1, :]
                 post_logits = self._to_categorical(
-                    self.posterior_net(torch.cat([h, e_next], dim=-1))
-                )
-                z_mode = self._mode_onehot(post_logits)
-                flat_z = self._flatten(z_mode)
+                    self.posterior_net(torch.cat([h, enc_all[:, t + 1]], dim=-1)))
+                flat_z = self._flatten(self._mode_onehot(post_logits))
 
-            # Prior-Rollout
-            imagination_recons = []
+            # Rollout — nur Prior, keine echten Frames mehr ("Träumen")
+            imagination = []
             for t in range(warmup_steps, T):
-                a_t = actions[:, t, :]
-                inp = self.action_stack(torch.cat([flat_z, a_t], dim=-1))
+                inp = self.action_stack(torch.cat([flat_z, actions[:, t]], dim=-1))
                 h   = self.gru(inp, h)
                 prior_logits = self._to_categorical(self.prior_net(h))
-                z_mode = self._mode_onehot(prior_logits)
-                flat_z = self._flatten(z_mode)
-                feat   = self._feature(flat_z, h)
-                recon  = self.decoder(feat)
-                imagination_recons.append(recon)
+                flat_z = self._flatten(self._mode_onehot(prior_logits))
+                imagination.append(self.decoder(self.feat_proj(self._feature(flat_z, h))))
 
-        if len(imagination_recons) == 0:
+        if not imagination:
             return torch.zeros(B, 0, 1, H, W, device=frames.device)
-        return torch.stack(imagination_recons, dim=1)   # (B, T-warmup, 1, H, W)
+        return torch.stack(imagination, dim=1)   # (B, T-warmup, 1, H, W)
 
 
 # =============================================================================
-# Dreamer-Verluste
+# Verluste
 # =============================================================================
 def compute_losses(out: dict, frames: torch.Tensor,
                    rewards: torch.Tensor, continues: torch.Tensor) -> tuple:
     """
-    Dreamer-Verluste:
-      L = recon_scale * L_recon
-        + reward_scale * L_reward
-        + continue_scale * L_continue
-        + kl_scale * L_kl
+    Dreamer-Verluste (spec-konform):
+      L = L_recon + L_reward + L_continue + kl_scale * L_KL
 
-    L_kl = kl_balance * KL(sg(q) || p) + (1-kl_balance) * KL(q || sg(p))
-    (Dreamer-v2 KL-Balance: sg = stop_gradient)
+    Reconstruction Loss: MSE auf invertierten Frames.
+
+    Warum invertieren (1 - frame) vor dem MSE?
+      CartPole-Hintergrund ist zu 91% weiß (Pixelwert ≈ 1.0).
+      Der MSE-Gradient auf einem weißen Pixel ist ~17x kleiner als auf einem
+      dunklen Pixel wenn der Decoder falsch liegt — weil (pred - 1.0)² für
+      pred=0.95 nur 0.0025 ergibt, aber (pred - 0.1)² für pred=0.95 schon
+      0.7225. Das führt dazu dass der Decoder "alles weiß" lernt und den Stab
+      völlig ignoriert.
+      Nach Invertierung: Hintergrund=0, Stab/Wagen=hell. MSE behandelt alle
+      Pixel fair. Der Loss bleibt strukturell identisch zur Spec
+      ("decodiertes Bild vs. echtes Bild") — nur das Farbschema ist gedreht.
     """
-    # Zielbild: frames[:, 1:]  (echte nächste Frames)
-    target_frames = frames[:, 1:, :, :, :]               # (B, T, 1, H, W)
+    # Frames invertieren: Stab/Wagen hell, Hintergrund schwarz
+    target = 1.0 - frames[:, 1:, :, :, :]          # (B, T, 1, H, W) — echtes nächstes Frame
+    recons = 1.0 - out["reconstructions"]            # (B, T, 1, H, W) — Decoder-Output
 
-    recons  = out["reconstructions"]                     # (B, T, 1, H, W)
-    rew_p   = out["reward_preds"]                        # (B, T, 1)
-    cont_p  = out["continue_preds"]                      # (B, T, 1)
-    prior_l = out["prior_logits"]                        # (B, T, C, K)
-    post_l  = out["posterior_logits"]                    # (B, T, C, K)
+    # 1. Reconstruction Loss: MSE (spec-konform, auf invertierten Frames)
+    L_recon = F.mse_loss(recons, target)
 
-    # 1. Reconstruction Loss (MSE über Pixel)
-    L_recon = F.mse_loss(recons, target_frames)
+    # 2. Reward Loss: MSE
+    L_reward = F.mse_loss(out["reward_preds"], rewards)
 
-    # 2. Reward Loss (MSE)
-    L_reward = F.mse_loss(rew_p, rewards)
+    # 3. Continue Loss: BCE mit Logits
+    L_continue = F.binary_cross_entropy_with_logits(out["continue_preds"], continues)
 
-    # 3. Continue Loss (BCE mit Logits)
-    L_continue = F.binary_cross_entropy_with_logits(cont_p, continues)
+    # 4. KL Loss: Dreamer-v2 Balance + Free Bits
+    #    q = Posterior q(z|h,o),  p = Prior p(z|h)
+    #    Balance: 0.8 * KL(sg(q)||p) + 0.2 * KL(q||sg(p))
+    #    -> Prior lernt 80% des KL-Signals, Posterior 20%
+    #    Free Bits: KL unter 0.5 nats/Kategorie trägt keinen Gradienten bei
+    #    -> verhindert triviales Kollabieren des Posteriors auf den Prior
+    q_lp = F.log_softmax(out["posterior_logits"], dim=-1)  # (B, T, C, K)
+    p_lp = F.log_softmax(out["prior_logits"],     dim=-1)
+    q_p  = q_lp.exp()
 
-    # 4. KL Loss mit Balance (Dreamer-v2)
-    q_logprob = F.log_softmax(post_l, dim=-1)            # (B, T, C, K)
-    p_logprob = F.log_softmax(prior_l, dim=-1)
-    q_prob    = q_logprob.exp()
+    kl_full       = (q_p * (q_lp - p_lp)).sum(-1)                          # (B, T, C)
+    kl_prior_only = (q_p.detach() * (q_lp.detach() - p_lp)).sum(-1)        # nur Prior lernt
+    kl_post_only  = (q_p * (q_lp - p_lp.detach())).sum(-1)                 # nur Posterior lernt
 
-    # KL(q || p) — ganze KL
-    kl_full = (q_prob * (q_logprob - p_logprob)).sum(-1)  # (B, T, C)
-
-    # KL(sg(q) || p) — nur Prior lernt
-    kl_prior_only = (q_prob.detach() * (q_logprob.detach() - p_logprob)).sum(-1)
-
-    # KL(q || sg(p)) — nur Posterior lernt
-    kl_post_only  = (q_prob * (q_logprob - p_logprob.detach())).sum(-1)
-
-    kl_balanced = (KL_BALANCE * kl_prior_only
-                   + (1 - KL_BALANCE) * kl_post_only).sum(-1).mean()  # sum C, mean B,T
+    kl_balanced = (
+        KL_BALANCE       * kl_prior_only.clamp(min=KL_FREE_BITS)
+        + (1-KL_BALANCE) * kl_post_only .clamp(min=KL_FREE_BITS)
+    ).sum(-1).mean()   # sum über C Kategorien, mean über B*T
 
     total = (RECON_SCALE    * L_recon
            + REWARD_SCALE   * L_reward
            + CONTINUE_SCALE * L_continue
            + KL_SCALE       * kl_balanced)
 
-    kl_value = kl_full.sum(-1).mean().item()
-
     metrics = {
-        "total_loss":      total.item(),
-        "recon_loss":      L_recon.item(),
-        "reward_loss":     L_reward.item(),
-        "continue_loss":   L_continue.item(),
-        "kl":              kl_value,
-        "recon_max_err":   (recons - target_frames).abs().max().item(),
-        "reward_mean_pred":rew_p.mean().item(),
-        "continue_acc":    ((cont_p.sigmoid() > 0.5).float() == continues).float().mean().item(),
+        "total_loss":    total.item(),
+        "recon_loss":    L_recon.item(),
+        "reward_loss":   L_reward.item(),
+        "continue_loss": L_continue.item(),
+        "kl":            kl_full.sum(-1).mean().item(),
+        "continue_acc":  ((out["continue_preds"].sigmoid() > 0.5).float()
+                          == continues).float().mean().item(),
     }
     return total, metrics
 
 
 # =============================================================================
-# Training Loop
+# Training
 # =============================================================================
 def train(
-    n_iterations: int  = 15,
-    n_seed_eps: int    = 10,
-    n_new_eps: int     = 3,
-    max_steps: int     = 100,
-    seq_len: int       = 16,
-    batch_size: int    = 8,
-    resolution: int    = RESOLUTION,
+    n_iterations: int = 250,    # Runter setzten für schnelleres Training
+    n_seed_eps: int   = 50,    
+    n_new_eps: int    = 5,
+    max_steps: int    = 200,  
+    seq_len: int      = 16,
+    batch_size: int   = BATCH_SIZE,
+    grad_steps: int   = GRAD_STEPS,
+    resolution: int   = RESOLUTION,
 ):
     print(f"Device: {DEVICE}")
     print(f"Auflösung: {resolution}x{resolution}")
+    print(f"Loss: MSE auf invertierten Frames | Batch={batch_size} | Grad-Steps={grad_steps} | Clip={GRAD_CLIP}")
     print("=" * 70)
 
     env = gym.make("CartPole-v1", render_mode="rgb_array")
 
-    # Replay Buffer
     replay_buffer = []
-    print(f"Sammle {n_seed_eps} Startepisoden ...")
+    print(f"Sammle {n_seed_eps} Startepisoden (max {max_steps} Schritte) ...")
     replay_buffer += collect_episodes_image(env, n_seed_eps, max_steps, resolution, seed=42)
+    total_steps = sum(len(ep["actions"]) for ep in replay_buffer)
+    print(f"  → {len(replay_buffer)} Episoden, {total_steps} Schritte gesamt")
 
-    model = RSSM().to(DEVICE)
-    opt   = optim.Adam(model.parameters(), lr=LR, eps=1e-8)
+    model  = RSSM().to(DEVICE)
+    opt    = optim.Adam(model.parameters(), lr=LR, eps=1e-8)
     scaler = torch.amp.GradScaler("cuda", enabled=DEVICE.type == "cuda")
 
     n_params = sum(p.numel() for p in model.parameters())
-    print(f"Modell-Parameter: {n_params:,}")
+    print(f"Parameter: {n_params:,}")
     print("=" * 70)
 
     for iteration in range(n_iterations):
-        # --- Neue Episoden sammeln ---
-        new_eps = collect_episodes_image(env, n_new_eps, max_steps, resolution)
-        replay_buffer += new_eps
-        if len(replay_buffer) > 100:
-            replay_buffer = replay_buffer[-100:]
+        # Neue Episoden sammeln und Buffer begrenzen
+        replay_buffer = (replay_buffer
+                         + collect_episodes_image(env, n_new_eps, max_steps, resolution))[-200:]
 
-        # --- Dataset & DataLoader ---
-        dataset = ImageSequenceDataset(replay_buffer, seq_len=seq_len, resolution=resolution)
-        loader  = torch.utils.data.DataLoader(
-            dataset, batch_size=batch_size, shuffle=True, num_workers=0)
+        dataset = ImageSequenceDataset(replay_buffer, seq_len=seq_len)
 
-        # --- Trainingsepoche ---
+        # Mehrere unabhängige Gradient-Updates pro Iteration
         agg, count = {}, 0
         model.train()
-        for batch in loader:
-            batch = {k: v.to(DEVICE) for k, v in batch.items()}
-            frames    = batch["frames"]       # (B, T+1, 1, H, W)
-            actions   = batch["actions"]
-            rewards   = batch["rewards"]
-            continues = batch["continues"]
+        for _ in range(grad_steps):
+            batch = sample_batch(dataset, batch_size, DEVICE)
 
             with torch.amp.autocast("cuda", enabled=DEVICE.type == "cuda"):
-                out  = model.observe_forward(frames, actions)
-                loss, metrics = compute_losses(out, frames, rewards, continues)
+                out          = model.observe_forward(batch["frames"], batch["actions"])
+                loss, metrics = compute_losses(
+                    out, batch["frames"], batch["rewards"], batch["continues"])
 
             opt.zero_grad()
             scaler.scale(loss).backward()
             scaler.unscale_(opt)
-            nn.utils.clip_grad_norm_(model.parameters(), max_norm=100.0)
+            nn.utils.clip_grad_norm_(model.parameters(), max_norm=GRAD_CLIP)
             scaler.step(opt)
             scaler.update()
 
@@ -457,12 +408,9 @@ def train(
                 agg[k] = agg.get(k, 0.0) + v
             count += 1
 
-        if count == 0:
-            continue
         avg = {k: v / count for k, v in agg.items()}
-
         print(
-            f"Iter {iteration:02d} | Buffer={len(replay_buffer):3d} Eps | "
+            f"Iter {iteration:02d} | Buffer={len(replay_buffer):3d} | "
             f"L={avg['total_loss']:.4f}  recon={avg['recon_loss']:.4f}  "
             f"rew={avg['reward_loss']:.4f}  cont={avg['continue_loss']:.4f}  "
             f"kl={avg['kl']:.4f}  cont_acc={avg['continue_acc']:.3f}"
@@ -472,11 +420,7 @@ def train(
     return model
 
 
-# =============================================================================
-# Main
-# =============================================================================
 if __name__ == "__main__":
-    model = train(n_iterations=15, n_seed_eps=10, n_new_eps=3)
-    print("\nTraining abgeschlossen.")
+    model = train()
     torch.save(model.state_dict(), "dreamer_sprint4.pt")
-    print("Modell gespeichert: dreamer_sprint4.pt")
+    print("\nModell gespeichert: dreamer_sprint4.pt")

@@ -36,25 +36,33 @@ LR_AC = 1e-4
 
 @dataclass
 class TrainConfig:
-    seq_len: int = 16
+    # --- Mehr Zeit zum Lernen ---
+    iterations: int = 100                  # Von 20 auf 100+ erhöhen (Haupt-Trainingsschleife)
+    epochs_per_phase: int = 4              # Von 1 auf 4 erhöhen (mehr Weltmodell-Updates pro Iteration)
+    
+    # --- Höhere Stabilität & Mehr Daten ---
+    batch_size: int = 32                   # Von 8 auf 32 oder 64 (macht die Gradienten deutlich stabiler)
+    seq_len: int = 32                      # Von 16 auf 32 (Weltmodell lernt längere zeitliche Zusammenhänge)
+    replay_capacity: int = 2000            # Von 300 auf 2000+ (Modell vergisst alte Erfahrungen nicht so schnell)
+
+    # --- Weiter in die Zukunft planen ---
+    imagination_horizon: int = 15          # Von 8 auf 15 erhöhen (Actor "träumt" und plant weiter voraus)
+    
+    # --- Exploration sichern ---
+    actor_entropy_coeff: float = 0.01      
+
     warmup_steps: int = 5
-    imagination_horizon: int = 8
-    batch_size: int = 8
-    epochs_per_phase: int = 1
     initial_random_episodes: int = 10
-    initial_world_model_epochs: int = 3
+    initial_world_model_epochs: int = 5   
     initial_ac_pretrain_iters: int = 3
     initial_ac_pretrain_episodes: int = 4
-    actor_entropy_coeff: float = 0.05
     ac_sample_episodes: int = 4
     clip_grad_norm: float = 0.5
     collect_episodes_per_iter: int = 4
-    max_steps: int = 200
-    iterations: int = 20
-    replay_capacity: int = 300
+    max_steps: int = 500                   
     train_interval_episodes: int = 4
     explore_epsilon: float = 0.05
-    eval_episodes: int = 20
+    eval_episodes: int = 10
 
 
 def build_actor_critic(world_model):

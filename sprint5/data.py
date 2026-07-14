@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.utils.data import Dataset
 import gymnasium as gym
 from collections import deque
 import random
@@ -38,49 +39,61 @@ class ReplayBuffer:
         return random.sample(self.buffer, n)
 
 
-class SequenceDataset(torch.utils.data.Dataset):
-    def __init__(self, episodes, seq_len=10):
-        self.seqs = []
-        for ep in episodes:
-            vis = np.array(ep["vis"], dtype=np.float32)
-            acts = np.array(ep["actions"], dtype=np.float32)
-            rews = np.array(ep["rewards"], dtype=np.float32)
-            conts = np.array(ep["continues"], dtype=np.float32)
-            L = len(acts)
-            if L < 1:
-                continue
-            start = 0
-            while start + seq_len <= L:
-                self.seqs.append(
-                    (
-                        vis[start:start + seq_len + 1],
-                        acts[start:start + seq_len],
-                        rews[start:start + seq_len],
-                        conts[start:start + seq_len],
-                    )
-                )
-                start += 1
-        if len(self.seqs) == 0:
-            for ep in episodes:
-                vis = np.array(ep["vis"], dtype=np.float32)
-                acts = np.array(ep["actions"], dtype=np.float32)
-                rews = np.array(ep["rewards"], dtype=np.float32)
-                conts = np.array(ep["continues"], dtype=np.float32)
-                L = len(acts)
-                if L < 1:
-                    continue
-                self.seqs.append((vis[:L + 1], acts[:L], rews[:L], conts[:L]))
+class SequenceDataset(Dataset):
+    def __init__(self, episodes, seq_len):
+        # Wir filtern extrem fehlerhafte/leere Episoden vorsichtshalber aus
+        self.episodes = [ep for ep in episodes if len(ep["actions"]) >= 2]
+        self.seq_len = seq_len
 
     def __len__(self):
-        return len(self.seqs)
+        return len(self.episodes)
 
     def __getitem__(self, idx):
-        o, a, r, c = self.seqs[idx]
+        ep = self.episodes[idx]
+        
+        # Rohe Arrays aus der Episode extrahieren
+        obs = np.array(ep["vis"], dtype=np.float32)        # Form: [ep_len + 1, obs_dim]
+        acts = np.array(ep["actions"], dtype=np.float32)    # Form: [ep_len, act_dim]
+        rews = np.array(ep["rewards"], dtype=np.float32)    # Form: [ep_len, 1]
+        conts = np.array(ep["continues"], dtype=np.float32)  # Form: [ep_len, 1]
+        
+        ep_len = len(acts)
+        
+        # Bestimme, wie viel wir maximal herausschneiden können
+        slice_len = min(ep_len, self.seq_len)
+        
+        # Slice die echten Daten bis zur maximal verfügbaren Länge
+        obs_slice = obs[:slice_len + 1]
+        acts_slice = acts[:slice_len]
+        rews_slice = rews[:slice_len]
+        conts_slice = conts[:slice_len]
+        
+        # Falls die Episode kürzer ist als seq_len, padden wir mit Nullen auf
+        if slice_len < self.seq_len:
+            pad_len = self.seq_len - slice_len
+            
+            # Padding für Observations (Zielform: [seq_len + 1, obs_dim])
+            obs_pad = np.zeros((pad_len, obs.shape[-1]), dtype=np.float32)
+            obs_slice = np.concatenate([obs_slice, obs_pad], axis=0)
+            
+            # Padding für Actions (Zielform: [seq_len, act_dim])
+            acts_pad = np.zeros((pad_len, acts.shape[-1]), dtype=np.float32)
+            acts_slice = np.concatenate([acts_slice, acts_pad], axis=0)
+            
+            # Padding für Rewards (Zielform: [seq_len, 1])
+            rews_pad = np.zeros((pad_len, rews.shape[-1]), dtype=np.float32)
+            rews_slice = np.concatenate([rews_slice, rews_pad], axis=0)
+            
+            # Padding für Continues (Zielform: [seq_len, 1])
+            # Wichtig: Abgelaufene Schritte erhalten als Continue-Signal ohnehin eine 0.0
+            conts_pad = np.zeros((pad_len, conts.shape[-1]), dtype=np.float32)
+            conts_slice = np.concatenate([conts_slice, conts_pad], axis=0)
+            
         return {
-            "observations": torch.from_numpy(o),
-            "actions": torch.from_numpy(a),
-            "rewards": torch.from_numpy(r),
-            "continues": torch.from_numpy(c),
+            "observations": torch.tensor(obs_slice),
+            "actions": torch.tensor(acts_slice),
+            "rewards": torch.tensor(rews_slice),
+            "continues": torch.tensor(conts_slice)
         }
 
 

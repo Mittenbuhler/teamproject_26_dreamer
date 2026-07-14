@@ -24,3 +24,19 @@ sprint4+5/__pycache__/RSSM_cartpole.cpython-313.pyc
 sprint4+5/__pycache__
 
 
+sprint5/actor.pth
+sprint5/world_model.pth
+sprint5/__pycache__/__init__.cpython-313.pyc
+sprint5/__pycache__/analysis_state_model.cpython-313.pyc
+sprint5/__pycache__/data.cpython-313.pyc
+sprint5/wm_accuracy.png
+sprint5/__pycache__/main.cpython-313.pyc
+sprint5/__pycache__/models.cpython-313.pyc
+sprint5/__pycache__/train.cpython-313.pyc
+sprint5/imagination_drift.png
+sprint5/balance_duration.png
+sprint5/critic.pth
+sprint5/policy_landscape.png
+.gitignore
+.gitignore
+sprint5/trajectory_comparison.png

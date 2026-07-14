@@ -160,4 +160,16 @@ def iterative_train(cfg=TrainConfig()):
 
 
 if __name__ == "__main__":
-    iterative_train()
+    # Startet das ausführliche Training
+    world_model, actor, critic = iterative_train()
+    
+    # HIER DIE ERGÄNZUNG ZUM SPEICHERN:
+    import torch
+    from pathlib import Path
+    
+    save_dir = Path(__file__).resolve().parent
+    torch.save(world_model.state_dict(), save_dir / "world_model.pth")
+    torch.save(actor.state_dict(), save_dir / "actor.pth")
+    torch.save(critic.state_dict(), save_dir / "critic.pth")
+    
+    print(f"\n[INFO] Modelle erfolgreich in {save_dir} für die Analyse gesichert!")

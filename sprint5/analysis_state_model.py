@@ -1,8 +1,8 @@
 """
 analysis_state_model.py — Sprint 5
-Analyse-Skript für das STATE-basierte Dreamer-Modell.
+Analyse-Skript für das BILD-basierte Dreamer-Modell.
 
-zuerst main ausführen: .venv/bin/python -m sprint5.main (damit man auch Daten hat)
+zuerst main ausführen: .venv/bin/python -m sprint5.main (damit man auch Daten/Gewichte hat)
 Ausführen mit: .venv/bin/python -m sprint5.analysis_state_model
 """
 
@@ -13,10 +13,9 @@ import gymnasium as gym
 import matplotlib.pyplot as plt
 from pathlib import Path
 
-from .models import RSSM, Actor, Critic, ObsActor, DEVICE
-from .data import SequenceDataset, collect_episodes, visible_state
+from .models import RSSM, Actor, Critic, DEVICE
+from .data import SequenceDataset, collect_episodes, render_frame, select_action
 
-VAR_NAMES = ["Position (x)", "Winkel (θ)"]
 SCRIPT_DIR = Path(__file__).resolve().parent
 
 
@@ -45,8 +44,7 @@ def load_or_train():
     if critic_path.exists():
         critic.load_state_dict(torch.load(critic_path, map_location=DEVICE))
 
-    obs_actor = ObsActor(world_model.obs_size, feat_size, policy=actor).to(DEVICE)
-    return world_model, actor, critic, obs_actor
+    return world_model, actor, critic
 
 
 # =============================================================================
@@ -67,10 +65,11 @@ def analyze_world_model_accuracy(world_model, episodes, seq_len: int = 16, batch
     for batch in loader:
         batch = {k: v.to(DEVICE) for k, v in batch.items()}
         out = world_model.observe_forward(batch["observations"], batch["actions"])
-        target_obs = batch["observations"][:, 1:, :]
+        target_obs = batch["observations"][:, 1:]  # (B, T, 1, 32, 32)
 
-        post_obs_errs.append(((out["posterior_predictions"]["observation"] - target_obs) ** 2).mean(dim=(0, 1)).cpu().numpy())
-        prior_obs_errs.append(((out["prior_predictions"]["observation"] - target_obs) ** 2).mean(dim=(0, 1)).cpu().numpy())
+        # MSE über alle Pixel/Kanal-Dimensionen, nicht mehr pro Zustandsvariable
+        post_obs_errs.append(F.mse_loss(out["posterior_predictions"]["observation"], target_obs).item())
+        prior_obs_errs.append(F.mse_loss(out["prior_predictions"]["observation"], target_obs).item())
         post_reward_errs.append(F.mse_loss(out["posterior_predictions"]["reward"], batch["rewards"]).item())
         prior_reward_errs.append(F.mse_loss(out["prior_predictions"]["reward"], batch["rewards"]).item())
 
@@ -81,23 +80,23 @@ def analyze_world_model_accuracy(world_model, episodes, seq_len: int = 16, batch
         n_cont += batch["continues"].numel()
 
     return {
-        "obs_mse_posterior": np.mean(post_obs_errs, axis=0),
-        "obs_mse_prior":     np.mean(prior_obs_errs, axis=0),
+        "obs_mse_posterior": float(np.mean(post_obs_errs)),
+        "obs_mse_prior": float(np.mean(prior_obs_errs)),
         "reward_mse_posterior": float(np.mean(post_reward_errs)),
-        "reward_mse_prior":     float(np.mean(prior_reward_errs)),
+        "reward_mse_prior": float(np.mean(prior_reward_errs)),
         "continue_acc_posterior": post_cont_correct / n_cont,
-        "continue_acc_prior":     prior_cont_correct / n_cont,
+        "continue_acc_prior": prior_cont_correct / n_cont,
     }
 
 
 def plot_world_model_accuracy(results: dict, save_path: str):
-    labels = VAR_NAMES + ["Reward"]
-    post_vals = list(results["obs_mse_posterior"]) + [results["reward_mse_posterior"]]
-    prior_vals = list(results["obs_mse_prior"]) + [results["reward_mse_prior"]]
+    labels = ["Bild (Obs)", "Reward"]
+    post_vals = [results["obs_mse_posterior"], results["reward_mse_posterior"]]
+    prior_vals = [results["obs_mse_prior"], results["reward_mse_prior"]]
 
     x = np.arange(len(labels))
     width = 0.35
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(10, 4.5))
 
     axes[0].bar(x - width / 2, post_vals, width, label="Posterior (mit Observation)", color="#2ecc71")
     axes[0].bar(x + width / 2, prior_vals, width, label="Prior (rein träumend)", color="#e67e22")
@@ -121,26 +120,45 @@ def plot_world_model_accuracy(results: dict, save_path: str):
 
 
 # =============================================================================
-# 2. Balance-Dauer
+# 2. Balance-Dauer (jetzt online über den echten RSSM-Rollout)
 # =============================================================================
-def analyze_balance_duration(obs_actor, n_episodes: int = 50, max_steps: int = 200):
-    env = gym.make("CartPole-v1")
-    
-    def rollout(policy_fn):
+def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps: int = 200):
+    world_model.eval()
+    actor.eval()
+    env = gym.make("CartPole-v1", render_mode="rgb_array")
+
+    def rollout_policy():
+        lengths = []
+        for ep in range(n_episodes):
+            obs, _ = env.reset(seed=ep)
+            flatz, h = world_model.initial(batch_size=1, device=DEVICE)
+            steps, done = 0, False
+            while not done and steps < max_steps:
+                a, a_idx = select_action(actor, flatz, h, epsilon=0.0)
+                obs, r, term, trunc, _ = env.step(a_idx)
+                done = term or trunc
+                frame = render_frame(env)
+                next_vis = torch.tensor(frame, dtype=torch.float32, device=DEVICE).unsqueeze(0)
+                flatz, h = world_model.step_online(flatz, h, a, next_vis)
+                steps += 1
+            lengths.append(steps)
+        return np.array(lengths)
+
+    def rollout_random():
         lengths = []
         for ep in range(n_episodes):
             obs, _ = env.reset(seed=ep)
             steps, done = 0, False
             while not done and steps < max_steps:
-                action = policy_fn(obs)
-                obs, r, term, trunc, _ = env.step(action)
+                a_idx = env.action_space.sample()
+                obs, r, term, trunc, _ = env.step(a_idx)
                 done = term or trunc
                 steps += 1
             lengths.append(steps)
         return np.array(lengths)
 
-    trained = rollout(lambda o: torch.distributions.Categorical(logits=obs_actor(torch.tensor(visible_state(o), dtype=torch.float32).unsqueeze(0))).sample().item())
-    random_ = rollout(lambda o: env.action_space.sample())
+    trained = rollout_policy()
+    random_ = rollout_random()
     env.close()
     return {"trained": trained, "random": random_}
 
@@ -182,9 +200,9 @@ def analyze_imagination_drift(world_model, episodes, horizon: int = 15):
     world_model.eval()
     usable = [ep for ep in episodes if len(ep["actions"]) >= horizon + 1][:20]
     per_step_errors = []
-    
+
     for ep in usable:
-        vis = np.array(ep["vis"], dtype=np.float32)
+        vis = np.array(ep["vis"], dtype=np.float32)  # (T+1, 1, 32, 32)
         acts = np.array(ep["actions"], dtype=np.float32)
         o = torch.tensor(vis, device=DEVICE).unsqueeze(0)
         a = torch.tensor(acts, device=DEVICE).unsqueeze(0)
@@ -195,7 +213,8 @@ def analyze_imagination_drift(world_model, episodes, horizon: int = 15):
 
         real_future = vis[2:2 + horizon]
         T_valid = min(len(real_future), imagined_obs.shape[0])
-        err = ((imagined_obs[:T_valid].cpu().numpy() - real_future[:T_valid]) ** 2).mean(axis=-1)
+        # MSE ueber alle Bild-Dimensionen (Kanal, Hoehe, Breite), nicht nur letzte Achse
+        err = ((imagined_obs[:T_valid].cpu().numpy() - real_future[:T_valid]) ** 2).mean(axis=(1, 2, 3))
         per_step_errors.append(err)
 
     padded = np.full((len(per_step_errors), horizon), np.nan)
@@ -211,7 +230,7 @@ def plot_imagination_drift(results: dict, save_path: str):
     ax.plot(steps, mean_err, color="#3498db", marker="o", label="Mittlerer Drift-MSE")
     ax.fill_between(steps, mean_err - std_err, mean_err + std_err, color="#3498db", alpha=0.2)
     ax.set_xlabel("Schritte in die Zukunft geträumt")
-    ax.set_ylabel("MSE (Zustand)")
+    ax.set_ylabel("MSE (Bild)")
     ax.set_title("Analyse 3: Akkumulierter Dynamik-Drift im Open-Loop", fontweight="bold")
     ax.legend()
     plt.tight_layout()
@@ -220,13 +239,14 @@ def plot_imagination_drift(results: dict, save_path: str):
 
 
 # =============================================================================
-# NEU! 4. "Traum vs. Realität" (Direkter Trajektorien-Vergleich)
+# 4. "Traum vs. Realität" — jetzt als Bildraster statt Linienplot
 # =============================================================================
 @torch.no_grad()
-def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, horizon: int = 25):
-    """ Pickt eine Episode und stellt echten Zustand vs. geträumten Zustand dar """
+def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, horizon: int = 8, n_show: int = 6):
+    """Zeigt reale vs. geträumte Frames nebeneinander für ausgewählte Zeitschritte.
+    Ein Linienplot über Zustandsvariablen (wie im state-basierten Sprint) ergibt
+    fuer Bildbeobachtungen keinen Sinn mehr -- stattdessen direkter Bildvergleich."""
     world_model.eval()
-    # Finde die längste Episode für einen schönen Plot
     ep = max(test_episodes, key=lambda e: len(e["actions"]))
     H = min(horizon, len(ep["actions"]) - 2)
 
@@ -236,72 +256,90 @@ def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, hori
     o = torch.tensor(vis, device=DEVICE).unsqueeze(0)
     a = torch.tensor(acts, device=DEVICE).unsqueeze(0)
 
-    # Initialisiere Zustand im Weltmodell aus erstem Schritt
     start_flatz, start_h = world_model.posterior_start_state(o, a, t0=0)
-    real_actions = a[:, 1:1+H, :]
-    
-    # Generiere davorhergesagte Flugbahn im Geiste des Modells
+    real_actions = a[:, 1:1 + H, :]
     imagined_obs = _open_loop_rollout_fixed_actions(world_model, start_flatz, start_h, real_actions)[0].cpu().numpy()
-    real_future = vis[2:2+H]
+    real_future = vis[2:2 + H]
 
-    steps = np.arange(1, H + 1)
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    show_idx = np.linspace(0, H - 1, min(n_show, H)).astype(int)
+    fig, axes = plt.subplots(2, len(show_idx), figsize=(2.2 * len(show_idx), 5))
+    for col, t in enumerate(show_idx):
+        axes[0, col].imshow(real_future[t, 0], cmap="gray", vmin=0, vmax=1)
+        axes[0, col].set_title(f"t+{t + 1}", fontsize=9)
+        axes[0, col].set_xticks([])
+        axes[0, col].set_yticks([])
+        axes[1, col].imshow(imagined_obs[t, 0], cmap="gray", vmin=0, vmax=1)
+        axes[1, col].set_xticks([])
+        axes[1, col].set_yticks([])
 
-    for i, name in enumerate(VAR_NAMES):
-        axes[i].plot(steps, real_future[:, i], label="Reale Umgebung (Wahrheit)", color="black", linewidth=2.5)
-        axes[i].plot(steps, imagined_obs[:, i], label="Modell-Traum (Prior)", color="#3498db", linestyle="--", linewidth=2.5)
-        axes[i].set_title(f"Zustandsverlauf: {name}", fontweight="bold")
-        axes[i].set_xlabel("Zeitschritte voraus")
-        axes[i].set_ylabel("Skalierter Wert")
-        axes[i].grid(True, alpha=0.3)
-        axes[i].legend()
+    fig.text(0.02, 0.72, "Real", va="center", rotation="vertical", fontsize=11, fontweight="bold")
+    fig.text(0.02, 0.28, "Traum", va="center", rotation="vertical", fontsize=11, fontweight="bold")
 
-    plt.suptitle("Analyse 4: Intuitions-Check — Wie präzise 'träumt' das Weltmodell?", fontsize=13, fontweight="bold")
-    plt.tight_layout()
+    plt.suptitle("Analyse 4: Real vs. geträumte Beobachtung (Open-Loop)", fontsize=13, fontweight="bold")
+    plt.tight_layout(rect=[0.04, 0, 1, 1])
     plt.savefig(save_path, dpi=120)
     plt.close()
     print(f" -> Grafik gespeichert: {save_path}")
 
 
 # =============================================================================
-# NEU! 5. Policy-Entscheidungslandschaft (2D-Heatmap)
+# 5. Policy-Entscheidungslandschaft — jetzt entlang echter Trajektorien
 # =============================================================================
 @torch.no_grad()
-def plot_policy_landscape(obs_actor, save_path: str):
-    """ Scannt das Netzwerk auf einem 2D-Gitter ab, um die Logik zu visualisieren """
-    obs_actor.eval()
-    
-    # Erstelle dichte Auflösung für Position x und Polwinkel theta
-    x_grid = np.linspace(-2.0, 2.0, 100)
-    theta_grid = np.linspace(-0.22, 0.22, 100)
-    X, Y = np.meshgrid(x_grid, theta_grid)
-    
-    # Zusammenbauen als [Position, Winkel]-Eingabe
-    grid_data = np.stack([X.ravel(), Y.ravel()], axis=-1).astype(np.float32)
-    grid_tensor = torch.tensor(grid_data, device=DEVICE)
-    
-    logits = obs_actor(grid_tensor)
-    probs = F.softmax(logits, dim=-1)[:, 1].cpu().numpy()  # Wahrscheinlichkeit für Aktion 1 ("RECHTS")
-    Z = probs.reshape(X.shape)
+def plot_policy_landscape(world_model, actor, test_episodes, save_path: str):
+    """Ein synthetischer 2D-Grid-Scan (wie im state-basierten Sprint) ist nicht
+    mehr moeglich: der Actor braucht einen History-abhaengigen Belief-State
+    (flatz, h), nicht nur ein Einzelbild -- ein isoliertes Bild bei (x, theta)
+    traegt keine Geschwindigkeitsinformation.
+
+    Stattdessen: echte gesammelte Trajektorien durch das Weltmodell laufen
+    lassen, die tatsaechlichen Belief-States extrahieren und die
+    Aktionswahrscheinlichkeit des Actors gegen die WAHREN Zustandsvariablen
+    auftragen (aus ep['fulls'], nur zur Visualisierung -- das Modell selbst
+    bekommt diese Werte nie als Input)."""
+    world_model.eval()
+    actor.eval()
+
+    xs, thetas, probs = [], [], []
+    for ep in test_episodes:
+        vis = np.array(ep["vis"], dtype=np.float32)
+        acts = np.array(ep["actions"], dtype=np.float32)
+        fulls = np.array(ep["fulls"], dtype=np.float32)  # (T+1, 4): x, xdot, theta, thetadot
+        if len(acts) < 1:
+            continue
+
+        o = torch.tensor(vis, device=DEVICE).unsqueeze(0)
+        a = torch.tensor(acts, device=DEVICE).unsqueeze(0)
+        out = world_model.observe_forward(o, a)
+        T = out["posterior_logits"].shape[1]
+        flatz_seq = world_model.mode_one_hot(out["posterior_logits"][0]).view(T, -1)
+
+        # observe_forward gibt h nicht direkt zurueck -> Rollout hier
+        # wiederholen, um h pro Zeitschritt zusammen mit dem Posterior-flatz zu haben.
+        flatz, h = world_model.initial(batch_size=1, device=DEVICE)
+        for t in range(T):
+            act_t = a[:, t, :]
+            h = world_model.gru(world_model.action_stack(torch.cat([flatz, act_t], dim=-1)), h)
+            flatz = flatz_seq[t].unsqueeze(0)
+            feat = torch.cat([flatz, h], dim=-1)
+            logits = actor(feat)
+            prob_right = F.softmax(logits, dim=-1)[0, 1].item()
+
+            xs.append(fulls[t, 0])
+            thetas.append(fulls[t, 2])
+            probs.append(prob_right)
+
+    xs, thetas, probs = np.array(xs), np.array(thetas), np.array(probs)
 
     fig, ax = plt.subplots(figsize=(8, 5.5))
-    # RdYlGn: Rot = Drücke nach Links, Grün = Drücke nach Rechts
-    contour = ax.pcolormesh(X, Y, Z, cmap="RdYlGn", vmin=0, vmax=1, shading='auto', alpha=0.85)
-    cbar = fig.colorbar(contour, ax=ax)
+    sc = ax.scatter(xs, thetas, c=probs, cmap="RdYlGn", vmin=0, vmax=1, s=25, alpha=0.85)
+    cbar = fig.colorbar(sc, ax=ax)
     cbar.set_label("Aktions-Wahrscheinlichkeit für RECHTS (Aktion 1)", fontsize=10)
-    
-    ax.set_xlabel("Cart-Position (x)")
-    ax.set_ylabel("Pol-Winkel (θ) in Radian")
-    ax.set_title("Analyse 5: Gelerntes Regelwerk des Actors (Policy-Map)", fontweight="bold", fontsize=12)
-    
-    # Null-Linien zur Orientierung einzeichnen
+    ax.set_xlabel("Cart-Position (x) — nur zur Visualisierung, kein Modell-Input")
+    ax.set_ylabel("Pol-Winkel (θ) — nur zur Visualisierung, kein Modell-Input")
+    ax.set_title("Analyse 5 (angepasst): Policy-Verhalten entlang realer Trajektorien", fontweight="bold", fontsize=12)
     ax.axhline(0, color="black", linewidth=1, linestyle=":")
     ax.axvline(0, color="black", linewidth=1, linestyle=":")
-    
-    # Erläuterungsbox
-    ax.text(-1.9, 0.16, "Stange kippt nach Links\n-> Drücke LINKS (Rot)", color="darkred", bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'))
-    ax.text(0.3, -0.19, "Stange kippt nach Rechts\n-> Drücke RECHTS (Grün)", color="darkgreen", bbox=dict(facecolor='white', alpha=0.7, boxstyle='round'))
-
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
     plt.close()
@@ -316,32 +354,30 @@ if __name__ == "__main__":
     print("Sprint 5 — Fortgeschrittene Konzept-Analyse des Dreamer-Modells")
     print("=" * 70)
 
-    world_model, actor, critic, obs_actor = load_or_train()
+    world_model, actor, critic = load_or_train()
 
-    env = gym.make("CartPole-v1")
+    env = gym.make("CartPole-v1", render_mode="rgb_array")
     print("\nSammle frische Test-Episoden aus der echten Umgebung ...")
-    test_episodes = collect_episodes(env, obs_actor, n_episodes=30, max_steps=200, seed=999, epsilon=0.0)
+    test_episodes = collect_episodes(env, world_model, actor, n_episodes=30, max_steps=200, seed=999, epsilon=0.0)
     env.close()
 
-    # Bestandsanalysen
     print("\n[1/5] Berechne Weltmodell-Genauigkeiten ...")
     wm_results = analyze_world_model_accuracy(world_model, test_episodes)
     plot_world_model_accuracy(wm_results, SCRIPT_DIR / "wm_accuracy.png")
 
     print("[2/5] Führe Benchmark-Rollouts durch (Trained vs Random) ...")
-    duration_results = analyze_balance_duration(obs_actor, n_episodes=50)
+    duration_results = analyze_balance_duration(world_model, actor, n_episodes=50)
     plot_balance_duration(duration_results, SCRIPT_DIR / "balance_duration.png")
 
     print("[3/5] Ermittle Imagination-Drift über Zeithorizont ...")
     drift_results = analyze_imagination_drift(world_model, test_episodes, horizon=15)
     plot_imagination_drift(drift_results, SCRIPT_DIR / "imagination_drift.png")
 
-    # Neue Analysen
     print("[4/5] Generiere qualitativen 'Traum vs. Realität'-Vergleich ...")
-    plot_qualitative_trajectory(world_model, test_episodes, SCRIPT_DIR / "trajectory_comparison.png", horizon=25)
+    plot_qualitative_trajectory(world_model, test_episodes, SCRIPT_DIR / "trajectory_comparison.png", horizon=8)
 
-    print("[5/5] Erzeuge 2D-Policy-Entscheidungslandschaft ...")
-    plot_policy_landscape(obs_actor, SCRIPT_DIR / "policy_landscape.png")
+    print("[5/5] Erzeuge Policy-Entscheidungslandschaft entlang realer Trajektorien ...")
+    plot_policy_landscape(world_model, actor, test_episodes, SCRIPT_DIR / "policy_landscape.png")
 
     print("\n" + "=" * 70)
     print("Analyse abgeschlossen!")

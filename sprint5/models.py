@@ -3,15 +3,19 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from .Encoder import Encoder
+from .Decoder import Decoder
+
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 C = 4
 K = 8
 STOCHASTIC_SIZE = C * K
 DETERMINISTIC_SIZE = 8
-HIDDEN_SIZE = 256
-OBSERVATION_SIZE = 2
+HIDDEN_SIZE = 64
 ACTION_SIZE = 2
+
+ENC_LATENT = 32  # Output-Dimension des Bild-Encoders (siehe encoder.py)
 
 
 class RSSM(nn.Module):
@@ -22,7 +26,7 @@ class RSSM(nn.Module):
         stoch_size=STOCHASTIC_SIZE,
         deter_size=DETERMINISTIC_SIZE,
         hidden_size=HIDDEN_SIZE,
-        obs_size=OBSERVATION_SIZE,
+        obs_size=ENC_LATENT,
         action_size=ACTION_SIZE,
     ):
         super().__init__()
@@ -31,7 +35,7 @@ class RSSM(nn.Module):
         self.stoch_size = stoch_size
         self.h_size = deter_size
         self.hid = hidden_size
-        self.obs_size = obs_size
+        self.obs_size = obs_size  # = Encoder-Latentgröße, nicht die rohe Bildgröße
         self.action_size = action_size
 
         self.action_stack = nn.Sequential(
@@ -56,7 +60,12 @@ class RSSM(nn.Module):
             nn.Linear(self.stoch_size + self.h_size, self.hid),
             nn.ReLU(),
         )
-        self.observation_head = nn.Linear(self.hid, self.obs_size)
+
+        # Bild-Encoder/-Decoder aus Sprint 4 (ersetzen den früheren
+        # Linear-observation_head, der auf rohe 2D-Zustände ausgelegt war)
+        self.image_encoder = Encoder()                     # (B,1,32,32) -> (B,32)
+        self.image_decoder = Decoder(latent_dim=self.hid)  # (B,hid)     -> (B,1,32,32)
+
         self.reward_head = nn.Linear(self.hid, 1)
         self.continue_head = nn.Linear(self.hid, 1)
 
@@ -86,15 +95,23 @@ class RSSM(nn.Module):
         idx = logits.argmax(dim=-1)
         return F.one_hot(idx, num_classes=self.K).float().to(logits.device)
 
+    def encode_obs(self, obs_img):
+        """Encodiert ein Bild-Batch (B,1,32,32) in den Latentraum (B, ENC_LATENT)."""
+        return self.image_encoder(obs_img)
+
     def prediction_heads(self, flatz, h):
         feat = self.pred_model(torch.cat([flatz, h], dim=-1))
         return {
-            "observation": self.observation_head(feat),
+            "observation": self.image_decoder(feat),  # (B,1,32,32)
             "reward": self.reward_head(feat),
             "continuelogit": self.continue_head(feat),
         }
 
     def observe_forward(self, observations, actions):
+        """
+        observations: (B, T+1, 1, 32, 32) Bilder
+        actions:      (B, T, action_size)
+        """
         B, T = observations.shape[0], actions.shape[1]
         flatz, h = self.initial(batch_size=B, device=observations.device)
 
@@ -112,9 +129,10 @@ class RSSM(nn.Module):
             prior_flatz = self.flatten_latent(prior_z)
             prior_preds.append(self.prediction_heads(prior_flatz, h))
 
-            next_obs = observations[:, t + 1, :]
+            next_obs_img = observations[:, t + 1]  # (B,1,32,32)
+            encoded_obs = self.encode_obs(next_obs_img)  # (B, ENC_LATENT)
             posterior_logits = self.logits_to_shape(
-                self.posterior_model(torch.cat([h, next_obs], dim=-1))
+                self.posterior_model(torch.cat([h, encoded_obs], dim=-1))
             )
             posterior_z = self.sample_straight_through(posterior_logits)
             posterior_flatz = self.flatten_latent(posterior_z)
@@ -141,11 +159,26 @@ class RSSM(nn.Module):
         for t in range(t0 + 1):
             act_t = actions[:, t, :]
             h = self.gru(self.action_stack(torch.cat([flatz, act_t], dim=-1)), h)
-            next_obs = observations[:, t + 1, :]
+            next_obs_img = observations[:, t + 1]
+            encoded_obs = self.encode_obs(next_obs_img)
             posterior_logits = self.logits_to_shape(
-                self.posterior_model(torch.cat([h, next_obs], dim=-1))
+                self.posterior_model(torch.cat([h, encoded_obs], dim=-1))
             )
             flatz = self.flatten_latent(self.mode_one_hot(posterior_logits))
+        return flatz, h
+
+    @torch.no_grad()
+    def step_online(self, flatz, h, action_onehot, next_obs_img):
+        """Ein einzelner Online-RSSM-Schritt für die echte Environment-Interaktion:
+        GRU-Update mit Aktion, danach Posterior-Update mit der neuen Beobachtung.
+        Identisch zur Trainingslogik in observe_forward, nur fuer einen Zeitschritt."""
+        act_feat = self.action_stack(torch.cat([flatz, action_onehot], dim=-1))
+        h = self.gru(act_feat, h)
+        encoded_obs = self.encode_obs(next_obs_img)
+        posterior_logits = self.logits_to_shape(
+            self.posterior_model(torch.cat([h, encoded_obs], dim=-1))
+        )
+        flatz = self.flatten_latent(self.mode_one_hot(posterior_logits))
         return flatz, h
 
     def imagine(self, start_flatz, start_h, actor, horizon=15):
@@ -210,31 +243,3 @@ class Critic(nn.Module):
 
     def forward(self, x):
         return self.net(x)
-
-
-class ObsActor(nn.Module):
-    """Small wrapper to let the agent act from raw observations.
-
-    The project uses an `Actor` that expects latent features
-    (stochastic + deterministic sizes). During environment
-    interaction we only have raw observations (size 2). This
-    class encodes raw observations into the expected feature
-    size and then forwards to the main `Actor` network.
-    """
-
-    def __init__(self, obs_size, feat_size, policy=None, hidden_size=128, num_actions=ACTION_SIZE):
-        super().__init__()
-        self.encoder = nn.Sequential(
-            nn.Linear(obs_size, hidden_size),
-            nn.ReLU(),
-            nn.Linear(hidden_size, feat_size),
-            nn.ReLU(),
-        )
-        self.policy = policy if policy is not None else Actor(feat_size, hidden_size=hidden_size, num_actions=num_actions)
-
-    def forward(self, x):
-        # ensure batch dim
-        if x.dim() == 1:
-            x = x.unsqueeze(0)
-        feat = self.encoder(x)
-        return self.policy(feat)

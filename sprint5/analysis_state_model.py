@@ -1,8 +1,9 @@
 """
-analysis.py — Sprint 5
+analysis_state_model.py — Sprint 5
 Analyse-Skript für das STATE-basierte Dreamer-Modell.
 
-Ausführen mit: .venv/bin/python -m sprint5.analysis
+zuerst main ausführen: .venv/bin/python -m sprint5.main (damit man auch Daten hat)
+Ausführen mit: .venv/bin/python -m sprint5.analysis_state_model
 """
 
 import numpy as np

@@ -157,13 +157,23 @@ class RSSM(nn.Module):
             action_logits = actor(feat)
             action_dist = torch.distributions.Categorical(logits=action_logits)
             a_idx = action_dist.sample()
-            a = F.one_hot(a_idx, num_classes=ACTION_SIZE).float()
+            
+            # --- OPTIMIERUNG: STRAIGHT-THROUGH DISCRETE ACTIONS ---
+            # Ermöglicht Gradientenfluss durch diskrete Aktions-Auswahlen
+            a_onehot = F.one_hot(a_idx, num_classes=self.action_size).float()
+            probs = F.softmax(action_logits, dim=-1)
+            a = a_onehot + probs - probs.detach()
+            # ------------------------------------------------------
 
             act_feat = self.action_stack(torch.cat([flatz, a], dim=-1))
             h = self.gru(act_feat, h)
 
             prior_logits = self.logits_to_shape(self.prior_model(h))
-            prior_z = self.mode_one_hot(prior_logits)
+            
+            # --- OPTIMIERUNG: STOCHASTISCHER STR.-THROUGH PRIOR TRANSITION ---
+            # Wir nutzen sample_straight_through statt des deterministischen Modus,
+            # um den Gradientenfluss durch die Dynamik zu wahren.
+            prior_z = self.sample_straight_through(prior_logits)
             flatz = self.flatten_latent(prior_z)
 
             pred = self.prediction_heads(flatz, h)

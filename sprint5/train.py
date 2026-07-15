@@ -12,13 +12,40 @@ CONTINUE_SCALE = 1.0
 GAMMA = 0.99
 LAMBDA = 0.95
 
+# --- KL-Balancing / Free-Bits (DreamerV2) ---
+KL_BALANCE = 0.8   # Gewicht auf dem Term, der den Prior Richtung Posterior zieht
+FREE_BITS = 1.0    # Nats/Zeitschritt, unterhalb derer der KL-Term nicht bestraft wird
 
-def compute_world_model_loss(model_out, observations, rewards, continues, priorscale=PRIOR_SCALE, klscale=KL_SCALE, rewardscale=REWARD_SCALE, continuescale=CONTINUE_SCALE):
+
+def _categorical_kl(logits_a, logits_b):
+    """KL(a || b) für kategoriale Verteilungen, letzte Achse = Klassen (K),
+    danach über die C kategorialen Gruppen summiert.
+    Input-Shape: (B, T, C, K) -> Output: (B, T)"""
+    log_a = F.log_softmax(logits_a, dim=-1)
+    log_b = F.log_softmax(logits_b, dim=-1)
+    probs_a = torch.exp(log_a)
+    kl = (probs_a * (log_a - log_b)).sum(dim=-1)  # (B, T, C)
+    return kl.sum(dim=-1)  # (B, T)
+
+
+def compute_world_model_loss(
+    model_out,
+    observations,
+    rewards,
+    continues,
+    priorscale=PRIOR_SCALE,
+    klscale=KL_SCALE,
+    rewardscale=REWARD_SCALE,
+    continuescale=CONTINUE_SCALE,
+    kl_balance=KL_BALANCE,
+    free_bits=FREE_BITS,
+):
     prior_logits = model_out["prior_logits"]
     posterior_logits = model_out["posterior_logits"]
     prior_preds = model_out["prior_predictions"]
     posterior_preds = model_out["posterior_predictions"]
-    target_obs = observations[:, 1:, :]
+    target_obs = observations[:, 1:]
+
     obs_mse_post = F.mse_loss(posterior_preds["observation"], target_obs)
     rew_mse_post = F.mse_loss(posterior_preds["reward"], rewards)
     cont_loss_post = F.binary_cross_entropy_with_logits(posterior_preds["continuelogit"], continues)
@@ -27,10 +54,24 @@ def compute_world_model_loss(model_out, observations, rewards, continues, priors
     cont_loss_prior = F.binary_cross_entropy_with_logits(prior_preds["continuelogit"], continues)
     posterior_loss = obs_mse_post + rewardscale * rew_mse_post + continuescale * cont_loss_post
     prior_loss = obs_mse_prior + rewardscale * rew_mse_prior + continuescale * cont_loss_prior
-    q_log_probs = F.log_softmax(posterior_logits, dim=-1)
-    p_log_probs = F.log_softmax(prior_logits, dim=-1)
-    q_probs = torch.exp(q_log_probs)
-    kl = (q_probs * (q_log_probs - p_log_probs)).sum(dim=-1).sum(dim=-1).mean()
+
+    # --- KL-Balancing ---
+    # kl_post_to_prior: Posterior wird per stop-gradient fixiert, Gradient
+    #   fliesst nur in den Prior -> zieht den Prior Richtung Posterior.
+    # kl_prior_to_post: Prior wird per stop-gradient fixiert, Gradient
+    #   fliesst nur in den Posterior -> haelt den Posterior in der Naehe des Priors.
+    # kl_balance > 0.5 gewichtet die erste Richtung staerker, damit der Prior
+    # schneller "aufholt" statt dass der Posterior zum Prior kollabiert.
+    kl_post_to_prior = _categorical_kl(posterior_logits.detach(), prior_logits)
+    kl_prior_to_post = _categorical_kl(posterior_logits, prior_logits.detach())
+
+    # Free bits: KL erst bestrafen, wenn er ueber der Mindestschwelle liegt,
+    # sonst bleibt der Gradient fuer diesen Anteil bei 0 -> verhindert Kollaps auf ~0.
+    kl_post_to_prior = torch.clamp(kl_post_to_prior, min=free_bits)
+    kl_prior_to_post = torch.clamp(kl_prior_to_post, min=free_bits)
+
+    kl = kl_balance * kl_post_to_prior.mean() + (1 - kl_balance) * kl_prior_to_post.mean()
+
     total = posterior_loss + priorscale * prior_loss + klscale * kl
     metrics = {
         "total_loss": float(total.detach()),
@@ -124,7 +165,6 @@ def train_actor_critic(
         bootstrap = critic(feats[:, -1]).squeeze(-1)
         targets = lambda_return(rewards, values.detach(), discounts, bootstrap)
 
-    # Normalize return targets and advantages for more stable learning.
     targets = (targets - targets.mean()) / (targets.std() + 1e-8)
     values_normalized = (values - values.mean()) / (values.std() + 1e-8)
 
@@ -141,9 +181,6 @@ def train_actor_critic(
     entropy = torch.distributions.Categorical(logits=actor_logits).entropy().mean()
     actor_loss = -(selected_logp * advantages).mean() - entropy_coeff * entropy
 
-    # Backpropagate actor and critic losses together to avoid
-    # "backward through the graph a second time" errors when parts
-    # of the imagined trajectory share computation.
     actor_opt.zero_grad()
     critic_opt.zero_grad()
     total_loss = actor_loss + critic_loss

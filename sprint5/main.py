@@ -1,3 +1,5 @@
+"""ausführen mit command: .venv/bin/python -m sprint5.main"""
+
 import gymnasium as gym
 import torch
 import torch.optim as optim
@@ -7,13 +9,6 @@ from .models import RSSM, Actor, Critic, DEVICE
 from .data import ReplayBuffer, collect_episodes, render_frame, select_action
 from .train import train_world_model, train_actor_critic
 from pathlib import Path
-
-SCRIPT_DIR = Path(__file__).resolve().parent
-
-
-
-"""ausführen mit command: .venv/bin/python -m sprint5.main"""
-
 
 def evaluate_policy(env, world_model, actor, episodes=5, max_steps=200):
     actor.eval()
@@ -165,6 +160,7 @@ def iterative_train(cfg=TrainConfig()):
         eval_return = evaluate_policy(env, world_model, actor, episodes=cfg.eval_episodes, max_steps=cfg.max_steps)
         print(f"iter={it:03d} buffer={len(replay_buffer):03d} wm={wm_metrics} ac={ac_metrics} eval_return={eval_return:.2f}")
 
+    SCRIPT_DIR = Path(__file__).resolve().parent
     torch.save(world_model.state_dict(), SCRIPT_DIR / "world_model.pth")
     torch.save(actor.state_dict(), SCRIPT_DIR / "actor.pth")
     torch.save(critic.state_dict(), SCRIPT_DIR / "critic.pth")

@@ -363,21 +363,22 @@ if __name__ == "__main__":
 
     print("\n[1/5] Berechne Weltmodell-Genauigkeiten ...")
     wm_results = analyze_world_model_accuracy(world_model, test_episodes)
-    plot_world_model_accuracy(wm_results, SCRIPT_DIR / "wm_accuracy.png")
+    print(wm_results)
+    #plot_world_model_accuracy(wm_results, SCRIPT_DIR / "wm_accuracy.png")
 
     print("[2/5] Führe Benchmark-Rollouts durch (Trained vs Random) ...")
     duration_results = analyze_balance_duration(world_model, actor, n_episodes=50)
-    plot_balance_duration(duration_results, SCRIPT_DIR / "balance_duration.png")
+    #plot_balance_duration(duration_results, SCRIPT_DIR / "balance_duration.png")
 
     print("[3/5] Ermittle Imagination-Drift über Zeithorizont ...")
     drift_results = analyze_imagination_drift(world_model, test_episodes, horizon=15)
-    plot_imagination_drift(drift_results, SCRIPT_DIR / "imagination_drift.png")
+    #plot_imagination_drift(drift_results, SCRIPT_DIR / "imagination_drift.png")
 
     print("[4/5] Generiere qualitativen 'Traum vs. Realität'-Vergleich ...")
-    plot_qualitative_trajectory(world_model, test_episodes, SCRIPT_DIR / "trajectory_comparison.png", horizon=8)
+    #plot_qualitative_trajectory(world_model, test_episodes, SCRIPT_DIR / "trajectory_comparison.png", horizon=8)
 
     print("[5/5] Erzeuge Policy-Entscheidungslandschaft entlang realer Trajektorien ...")
-    plot_policy_landscape(world_model, actor, test_episodes, SCRIPT_DIR / "policy_landscape.png")
+    #plot_policy_landscape(world_model, actor, test_episodes, SCRIPT_DIR / "policy_landscape.png")
 
     print("\n" + "=" * 70)
     print("Analyse abgeschlossen!")

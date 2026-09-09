@@ -55,9 +55,15 @@ class TrainConfig:
     seq_len: int = 25
     replay_capacity: int = 2000
     imagination_horizon: int = 15
-    actor_entropy_coeff: float = 3e-3      # hoeher: haelt Exploration laenger am Leben (gegen zu fruehen Entropie-Kollaps)
+    # Entropie-Annealing: hoch starten (breite Exploration -> findet zuverlaessig
+    # ueber alle Seeds den Weg nach oben), dann langsam senken (verfeinert Policy).
+    # Das reduziert die Seed-Streuung, weil kein Lauf mehr an zu frueher Konvergenz
+    # scheitert. actor_entropy_coeff wird im Loop zwischen diesen Werten interpoliert.
+    actor_entropy_coeff: float = 3e-3      # (Startwert, s. entropy_start/entropy_end)
+    entropy_start: float = 6e-3            # hohe Exploration am Anfang
+    entropy_end: float = 1e-3              # DreamerV2-Wert am Ende
     warmup_steps: int = 5
-    initial_random_episodes: int = 15
+    initial_random_episodes: int = 25      # mehr Zufallsdaten -> breitere Abdeckung von Anfang an
     initial_world_model_epochs: int = 30
     initial_ac_pretrain_iters: int = 3
     initial_ac_pretrain_episodes: int = 4
@@ -92,6 +98,8 @@ def iterative_train(cfg=TrainConfig()):
     # frisches Target-Netzwerk pro Trainingslauf
     if hasattr(train_actor_critic, "_target_critic"):
         del train_actor_critic._target_critic
+    if hasattr(train_actor_critic, "_ret_scale"):
+        del train_actor_critic._ret_scale
 
     # Best-Modell-Tracking zuruecksetzen (fuer diesen Lauf).
     iterative_train._best_return = -1.0
@@ -131,6 +139,11 @@ def iterative_train(cfg=TrainConfig()):
         print(f"pretrain={pre_it+1}/{cfg.initial_ac_pretrain_iters} buffer={len(replay_buffer):03d} ac={pre_ac_metrics} eval_return={pre_eval_return:.2f}")
 
     for it in range(cfg.iterations):
+        # Entropie-Annealing: linear von entropy_start (viel Exploration) zu
+        # entropy_end (feine Policy) ueber den Trainingsverlauf.
+        frac = it / max(1, cfg.iterations - 1)
+        ent_coeff = cfg.entropy_start + frac * (cfg.entropy_end - cfg.entropy_start)
+
         new_eps = collect_episodes(env, actor, world_model, n_episodes=cfg.collect_episodes_per_iter,
                                    max_steps=cfg.max_steps, epsilon=cfg.explore_epsilon)
         for ep in new_eps:
@@ -144,7 +157,7 @@ def iterative_train(cfg=TrainConfig()):
             ac_metrics = train_actor_critic(
                 world_model, actor, critic, actor_opt, critic_opt, replay_buffer,
                 imagination_horizon=cfg.imagination_horizon, warmup_steps=cfg.warmup_steps,
-                sample_episodes=cfg.ac_sample_episodes, entropy_coeff=cfg.actor_entropy_coeff,
+                sample_episodes=cfg.ac_sample_episodes, entropy_coeff=ent_coeff,
                 clip_norm=cfg.clip_grad_norm,
             )
 

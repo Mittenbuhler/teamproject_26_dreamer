@@ -132,7 +132,7 @@ def plot_world_model_accuracy(results: dict, save_path: str):
 # =============================================================================
 # 2. Balance-Dauer
 # =============================================================================
-def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps: int = 200):
+def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps: int = 500):
     env = gym.make("CartPole-v1")
 
     def trained_rollout():
@@ -179,7 +179,9 @@ def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps
 def plot_balance_duration(results: dict, save_path: str):
     trained, random_ = results["trained"], results["random"]
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    bins = np.arange(0, 210, 10)
+    # Bins bis 510: umfasst den vollen moeglichen Bereich (max_steps=500), damit
+    # starke Modelle nicht faelschlich an einer 200-Grenze "kleben".
+    bins = np.arange(0, 510, 20)
     ax.hist(random_, bins=bins, alpha=0.5, label=f"Zufall (Ø={random_.mean():.1f})", color="#95a5a6")
     ax.hist(trained, bins=bins, alpha=0.6, label=f"Actor (Ø={trained.mean():.1f})", color="#2ecc71")
     ax.set_xlabel("Schritte überlebt")
@@ -357,7 +359,7 @@ if __name__ == "__main__":
     env = gym.make("CartPole-v1")
     print("\nSammle frische Test-Episoden aus der echten Umgebung ...")
     # Kanonischer Handel: actor + world_model, greedy (epsilon=0.0).
-    test_episodes = collect_episodes(env, actor, world_model, n_episodes=30, max_steps=200, seed=999, epsilon=0.0)
+    test_episodes = collect_episodes(env, actor, world_model, n_episodes=30, max_steps=500, seed=999, epsilon=0.0)
     env.close()
 
     print("\n[1/5] Berechne Weltmodell-Genauigkeiten ...")

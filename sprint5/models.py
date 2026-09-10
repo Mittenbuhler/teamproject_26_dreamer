@@ -8,9 +8,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 C = 4
 K = 8
 STOCHASTIC_SIZE = C * K
-DETERMINISTIC_SIZE = 8
+DETERMINISTIC_SIZE = 64   # war 8: zu klein, um die Aktionsdynamik zu tragen.
 HIDDEN_SIZE = 256
-OBSERVATION_SIZE = 2
+OBSERVATION_SIZE = 4
 ACTION_SIZE = 2
 
 
@@ -148,6 +148,27 @@ class RSSM(nn.Module):
             flatz = self.flatten_latent(self.mode_one_hot(posterior_logits))
         return flatz, h
 
+    @torch.no_grad()
+    def act_step(self, prev_flatz, prev_h, prev_action, obs):
+        """Ein RSSM-Schritt beim Handeln in der echten Umgebung.
+
+        Nimmt den vorigen Latent-Zustand (prev_flatz, prev_h), die zuletzt
+        ausgefuehrte Aktion (one-hot) und die NEUE Beobachtung. Schreibt den
+        deterministischen Zustand fort und korrigiert den stochastischen Zustand
+        ueber den Posterior mit der neuen Beobachtung. Liefert den neuen
+        (flatz, h) sowie das Policy-Feature [flatz, h].
+
+        Damit sieht die Policy beim Handeln GENAU dieselbe Repraesentation wie
+        im Imagination-Training -- keine separate ObsActor-Kodierung noetig.
+        """
+        h = self.gru(self.action_stack(torch.cat([prev_flatz, prev_action], dim=-1)), prev_h)
+        posterior_logits = self.logits_to_shape(
+            self.posterior_model(torch.cat([h, obs], dim=-1))
+        )
+        flatz = self.flatten_latent(self.mode_one_hot(posterior_logits))
+        feat = torch.cat([flatz, h], dim=-1)
+        return flatz, h, feat
+
     def imagine(self, start_flatz, start_h, actor, horizon=15):
         flatz, h = start_flatz, start_h
         feats, rewards, discounts, action_logits_list, actions = [], [], [], [], []
@@ -157,22 +178,15 @@ class RSSM(nn.Module):
             action_logits = actor(feat)
             action_dist = torch.distributions.Categorical(logits=action_logits)
             a_idx = action_dist.sample()
-            
-            # --- OPTIMIERUNG: STRAIGHT-THROUGH DISCRETE ACTIONS ---
-            # Ermöglicht Gradientenfluss durch diskrete Aktions-Auswahlen
+
             a_onehot = F.one_hot(a_idx, num_classes=self.action_size).float()
             probs = F.softmax(action_logits, dim=-1)
             a = a_onehot + probs - probs.detach()
-            # ------------------------------------------------------
 
             act_feat = self.action_stack(torch.cat([flatz, a], dim=-1))
             h = self.gru(act_feat, h)
 
             prior_logits = self.logits_to_shape(self.prior_model(h))
-            
-            # --- OPTIMIERUNG: STOCHASTISCHER STR.-THROUGH PRIOR TRANSITION ---
-            # Wir nutzen sample_straight_through statt des deterministischen Modus,
-            # um den Gradientenfluss durch die Dynamik zu wahren.
             prior_z = self.sample_straight_through(prior_logits)
             flatz = self.flatten_latent(prior_z)
 
@@ -223,15 +237,6 @@ class Critic(nn.Module):
 
 
 class ObsActor(nn.Module):
-    """Small wrapper to let the agent act from raw observations.
-
-    The project uses an `Actor` that expects latent features
-    (stochastic + deterministic sizes). During environment
-    interaction we only have raw observations (size 2). This
-    class encodes raw observations into the expected feature
-    size and then forwards to the main `Actor` network.
-    """
-
     def __init__(self, obs_size, feat_size, policy=None, hidden_size=128, num_actions=ACTION_SIZE):
         super().__init__()
         self.encoder = nn.Sequential(
@@ -243,7 +248,6 @@ class ObsActor(nn.Module):
         self.policy = policy if policy is not None else Actor(feat_size, hidden_size=hidden_size, num_actions=num_actions)
 
     def forward(self, x):
-        # ensure batch dim
         if x.dim() == 1:
             x = x.unsqueeze(0)
         feat = self.encoder(x)

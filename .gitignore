@@ -40,3 +40,16 @@ sprint5/policy_landscape.png
 .gitignore
 .gitignore
 sprint5/trajectory_comparison.png
+cartpole_2D/world_model.pth
+cartpole_2D/__pycache__/analysis_state_model.cpython-313.pyc
+cartpole_2D/__pycache__/data.cpython-313.pyc
+cartpole_2D/__pycache__/main.cpython-313.pyc
+cartpole_2D/__pycache__/models.cpython-313.pyc
+cartpole_2D/__pycache__/train.cpython-313.pyc
+cartpole_2D/plots/balance_duration.png
+cartpole_2D/plots/imagination_drift.png
+cartpole_2D/plots/policy_landscape.png
+cartpole_2D/plots/trajectory_comparison.png
+cartpole_2D/plots/wm_accuracy.png
+cartpole_2D/actor.pth
+cartpole_2D/critic.pth

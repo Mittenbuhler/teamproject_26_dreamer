@@ -58,3 +58,6 @@ cartpole_2D/__pycache__/analysis_state_model.cpython-312.pyc
 cartpole_2D/__pycache__/data.cpython-312.pyc
 cartpole_2D/__pycache__/latent_analysis.cpython-312.pyc
 cartpole_2D/__pycache__/main.cpython-312.pyc
+*.pth
+*.png
+*.pyc

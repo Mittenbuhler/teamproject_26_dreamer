@@ -19,8 +19,9 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 C = 4
 K = 8
 STOCHASTIC_SIZE = C * K
-DETERMINISTIC_SIZE = 128   # [BREAKOUT] groesser als CartPole (64): Breakout ist komplexer
-HIDDEN_SIZE = 256
+DETERMINISTIC_SIZE = 256   # [BREAKOUT] groesser als CartPole (64): Breakout ist komplexer;
+                           # mehr Kapazitaet fuer die visuelle Dynamik (Hebel 4)
+HIDDEN_SIZE = 300
 # [BREAKOUT] Beobachtung ist jetzt ein Bild, keine Zahl mehr:
 OBS_CHANNELS = 4           # paddle, ball, trail, brick
 OBS_HW = 10                # 10x10 Grid

@@ -11,7 +11,8 @@ OBS_SCALE = 1.0        # Gewicht der Beobachtungsrekonstruktion (1.0 = DreamerV2
                        # hoehere Werte verbessern die Prior-Rekonstruktion nur marginal)
 REWARD_SCALE = 2.0
 CONTINUE_SCALE = 5.0
-GAMMA = 0.995          # DreamerV2 Discount (Tab. D.1)
+GAMMA = 0.99           # [BREAKOUT] DreamerV2-Atari-Wert; bei sparse rewards plant der
+                       # Agent weit voraus, 0.99 ist dafuer der uebliche Atari-Discount
 LAMBDA = 0.95          # lambda-target Parameter (Tab. D.1)
 ALPHA_KL = 0.8
 ACTOR_ENTROPY = 1e-3   # Actor entropy loss scale eta (Tab. D.1)

@@ -2,8 +2,8 @@
 analysis_state_model.py — Sprint 5
 Analyse-Skript für das 2D-basierte Dreamer-Modell.
 
-zuerst main ausführen: python -m sprint5_2D.main (damit man Gewichte hat)
-Ausführen mit: python -m sprint5_2D.analysis_state_model
+zuerst main ausführen: python -m cartpole_2D.main (damit man Gewichte hat)
+Ausführen mit: python -m cartpole_2D.analysis_state_model
 """
 
 import numpy as np

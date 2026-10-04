@@ -12,7 +12,7 @@ Lern-Kern -- lambda-Returns, Advantage-Normalisierung, Critic-Normalisierung,
 Best-Modell-Speicherung, Entropie-Annealing -- ist identisch, weil er rein im
 Latent-Raum des Weltmodells arbeitet.
 
-Ausfuehren mit:  python -m sprint5.main_breakout
+Ausfuehren mit:  python -m minatar_breakout.main_breakout
 """
 import torch
 import torch.optim as optim
@@ -73,12 +73,12 @@ class TrainConfig:
     Rechenzeit, bis der Agent zuverlaessig Bricks trifft.
     """
     # --- Trainingsdauer & Datenmenge ---
-    iterations: int = 200                  # Haupt-Trainingsschleife (fuer Breakout eher mehr)
+    iterations: int = 500                  # [BREAKOUT] Hebel 1: Breakout braucht viel mehr Iterationen
     epochs_per_phase: int = 4              # Weltmodell-Updates pro Iteration
     batch_size: int = 32
     seq_len: int = 25                      # Sequenzlaenge fuer das Weltmodell-Training
-    replay_capacity: int = 2000            # Replay-Buffer-Groesse (in Episoden)
-    imagination_horizon: int = 15          # wie weit der Actor "traeumt"
+    replay_capacity: int = 5000            # [BREAKOUT] Hebel 1: mehr Daten -> mehr seltene Reward-Beispiele
+    imagination_horizon: int = 25          # [BREAKOUT] Hebel 2: laengerer Traum -> mehr Belohnung im Planungshorizont
 
     # --- Exploration via Entropie-Annealing ---
     # Hoch starten (breite Exploration -> findet zuverlaessiger ueber verschiedene
@@ -86,12 +86,12 @@ class TrainConfig:
     # actor_entropy_coeff wird im Loop linear zwischen Start und Ende interpoliert.
     # Hinweis: Breakout hat 3 Aktionen -> uniforme Entropie ist ln(3) ~ 1.10.
     actor_entropy_coeff: float = 3e-3      # Fallback-Startwert (ueberschrieben durch entropy_start)
-    entropy_start: float = 6e-3            # viel Exploration am Anfang
+    entropy_start: float = 1e-2            # [BREAKOUT] Hebel 5: mehr Start-Exploration (sparse rewards)
     entropy_end: float = 1e-3              # DreamerV2-Wert gegen Ende (Tab. D.1)
 
     # --- Aufwaermphase (vor dem Haupttraining) ---
     warmup_steps: int = 5                  # Posterior-Warmup vor der Imagination
-    initial_random_episodes: int = 25      # Zufallsdaten zum Start -> breite Zustandsabdeckung
+    initial_random_episodes: int = 60      # [BREAKOUT] Hebel 1: mehr Zufallsdaten (Breakout-Episoden sind kurz)
     initial_world_model_epochs: int = 30   # Weltmodell vortrainieren, bevor der Actor lernt
     initial_ac_pretrain_iters: int = 3     # Actor-Critic-Vortraining (Iterationen)
     initial_ac_pretrain_episodes: int = 4  # Episoden pro Vortrainings-Iteration
@@ -102,7 +102,7 @@ class TrainConfig:
     clip_grad_norm: float = 100.0          # Gradient-Clipping (DreamerV2 Tab. D.1)
 
     # --- Datensammlung & Evaluation ---
-    collect_episodes_per_iter: int = 6     # frische Umgebungsdaten pro Iteration
+    collect_episodes_per_iter: int = 16    # [BREAKOUT] Hebel 1: deutlich mehr frische Daten pro Iteration
     max_steps: int = 500                   # max. Schritte pro Episode (Breakout endet sonst selbst)
     train_interval_episodes: int = 4       # (reserviert, derzeit ungenutzt)
     explore_epsilon: float = 0.0           # Exploration laeuft ueber Actor-Entropie, nicht epsilon

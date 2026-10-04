@@ -7,8 +7,8 @@ und rekonstruiert daraus die 4 echten CartPole-Zustandsvariablen. Das Modell
 selbst sieht diese Werte nie in der Analyse -- sie werden aus ep["fulls"]
 entnommen. (Da das Weltmodell jetzt selbst 4D sieht, ist "fulls" == "vis".)
 
-Ausführen mit: python3 -m sprint5.latent_analysis
-Voraussetzung: python -m sprint5.main wurde ausgeführt (world_model.pth /
+Ausführen mit: python3 -m cartpole_2D.latent_analysis
+Voraussetzung: python3 -m cartpole_2D.main wurde ausgeführt (world_model.pth /
 actor.pth im sprint5/-Ordner).
 """
 

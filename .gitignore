@@ -61,3 +61,4 @@ cartpole_2D/__pycache__/main.cpython-312.pyc
 *.pth
 *.png
 *.pyc
+cartpole_4D/cartpole_balance.gif

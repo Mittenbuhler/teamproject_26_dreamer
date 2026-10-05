@@ -185,8 +185,20 @@ def train_actor_critic(world_model, actor, critic, actor_opt, critic_opt, replay
             torch.cat([torch.ones_like(discounts[:, :1]), discounts[:, :-1]], dim=1), dim=1
         )
 
-    # --- CRITIC-LOSS (Gl. 5): MSE gegen sg(V^lambda), discount-gewichtet ---
-    critic_loss = (discount_weight * (values - targets.detach()) ** 2).mean()
+   # --- CRITIC-LOSS (Gl. 5): MSE gegen sg(V^lambda), discount-gewichtet ---
+   # Normalisierung gegen Critic-Divergenz: Wenn die Policy gut wird, wachsen die
+   # lambda-Returns stark (in CartPole bis ~400) und der absolute MSE explodiert.
+   # Wir teilen den Critic-Loss durch eine laufende Skala (EMA der Target-Streuung),
+   # damit die Gradientengroesse unabhaengig von der absoluten Reward-Hoehe bleibt.
+    with torch.no_grad():
+      target_scale = targets.detach().std().clamp(min=1.0)
+      ema = getattr(train_actor_critic, "_ret_scale", None)
+      if ema is None:
+        ema = target_scale
+      else:
+        ema = 0.99 * ema + 0.01 * target_scale
+      train_actor_critic._ret_scale = ema
+    critic_loss = (discount_weight * (values - targets.detach()) ** 2).mean() / (ema ** 2)
 
     # --- ACTOR-LOSS (Gl. 6): REINFORCE mit Baseline + Entropie ---
     actor_logits = imag["action_logits"]                     # (B, T, A)

@@ -6,7 +6,7 @@ Agenten ueber den kanonischen RSSM-Handel-Pfad spielen (wie evaluate_policy),
 rendert dabei jeden Frame und speichert alles als GIF.
 
 Ausfuehren (aus dem Ordner ueber sprint5/):
-    python -m sprint5.make_gif
+    python -m cartpole_4D.make_gif
 """
 import numpy as np
 import torch

@@ -53,3 +53,12 @@ cartpole_2D/plots/trajectory_comparison.png
 cartpole_2D/plots/wm_accuracy.png
 cartpole_2D/actor.pth
 cartpole_2D/critic.pth
+cartpole_2D/__pycache__/models.cpython-312.pyc
+cartpole_2D/__pycache__/analysis_state_model.cpython-312.pyc
+cartpole_2D/__pycache__/data.cpython-312.pyc
+cartpole_2D/__pycache__/latent_analysis.cpython-312.pyc
+cartpole_2D/__pycache__/main.cpython-312.pyc
+*.pth
+*.png
+*.pyc
+cartpole_4D/cartpole_balance.gif

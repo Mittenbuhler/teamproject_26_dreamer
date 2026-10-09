@@ -6,10 +6,10 @@ from .models import RSSM, Actor, Critic, DEVICE
 from .data import ReplayBuffer, collect_episodes, visible_state, onehot_action
 from .train import train_world_model, train_actor_critic
 
-"""ausführen mit command: python -m cartpole_4D.main"""
+"""ausführen mit command: python -m sprint5.main"""
 
 
-def evaluate_policy(env, world_model, actor, episodes=5, max_steps=200):
+def evaluate_policy(env, world_model, actor, episodes=5, max_steps=500):
     """Evaluiert die Policy ueber den kanonischen RSSM-Handel: der RSSM-Zustand
     wird ueber die Episode mitgefuehrt, die Policy handelt auf [flatz, h]."""
     world_model.eval()

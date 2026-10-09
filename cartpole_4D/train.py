@@ -7,6 +7,8 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 ACTION_SIZE = 2
 PRIOR_SCALE = 0.5
 KL_SCALE = 0.1
+OBS_SCALE = 1.0        # Gewicht der Beobachtungsrekonstruktion (1.0 = DreamerV2-Standard;
+                       # hoehere Werte verbessern die Prior-Rekonstruktion nur marginal)
 REWARD_SCALE = 2.0
 CONTINUE_SCALE = 5.0
 GAMMA = 0.995          # DreamerV2 Discount (Tab. D.1)
@@ -20,7 +22,7 @@ SLOW_CRITIC_UPDATE = 50   # Target-Netzwerk-Update-Intervall (haeufiger = stabil
 def compute_world_model_loss(model_out, observations, rewards, continues,
                              priorscale=PRIOR_SCALE, klscale=KL_SCALE,
                              rewardscale=REWARD_SCALE, continuescale=CONTINUE_SCALE, alpha=ALPHA_KL,
-                             mask=None):
+                             mask=None, obsscale=OBS_SCALE):
     prior_logits = model_out["prior_logits"]
     posterior_logits = model_out["posterior_logits"]
     prior_preds = model_out["prior_predictions"]
@@ -49,8 +51,8 @@ def compute_world_model_loss(model_out, observations, rewards, continues,
     rew_mse_prior = masked_mse(prior_preds["reward"], rewards)
     cont_loss_prior = masked_bce(prior_preds["continuelogit"], continues)
 
-    posterior_loss = obs_mse_post + rewardscale * rew_mse_post + continuescale * cont_loss_post
-    prior_loss = obs_mse_prior + rewardscale * rew_mse_prior + continuescale * cont_loss_prior
+    posterior_loss = obsscale * obs_mse_post + rewardscale * rew_mse_post + continuescale * cont_loss_post
+    prior_loss = obsscale * obs_mse_prior + rewardscale * rew_mse_prior + continuescale * cont_loss_prior
 
     def kl_divergence(logits_q, logits_p):
         q_log_probs = F.log_softmax(logits_q, dim=-1)
@@ -185,19 +187,19 @@ def train_actor_critic(world_model, actor, critic, actor_opt, critic_opt, replay
             torch.cat([torch.ones_like(discounts[:, :1]), discounts[:, :-1]], dim=1), dim=1
         )
 
-   # --- CRITIC-LOSS (Gl. 5): MSE gegen sg(V^lambda), discount-gewichtet ---
-   # Normalisierung gegen Critic-Divergenz: Wenn die Policy gut wird, wachsen die
-   # lambda-Returns stark (in CartPole bis ~400) und der absolute MSE explodiert.
-   # Wir teilen den Critic-Loss durch eine laufende Skala (EMA der Target-Streuung),
-   # damit die Gradientengroesse unabhaengig von der absoluten Reward-Hoehe bleibt.
+    # --- CRITIC-LOSS (Gl. 5): MSE gegen sg(V^lambda), discount-gewichtet ---
+    # Normalisierung gegen Critic-Divergenz: Wenn die Policy gut wird, wachsen die
+    # lambda-Returns stark (in CartPole bis ~400) und der absolute MSE explodiert.
+    # Wir teilen den Critic-Loss durch eine laufende Skala (EMA der Target-Streuung),
+    # damit die Gradientengroesse unabhaengig von der absoluten Reward-Hoehe bleibt.
     with torch.no_grad():
-      target_scale = targets.detach().std().clamp(min=1.0)
-      ema = getattr(train_actor_critic, "_ret_scale", None)
-      if ema is None:
-        ema = target_scale
-      else:
-        ema = 0.99 * ema + 0.01 * target_scale
-      train_actor_critic._ret_scale = ema
+        target_scale = targets.detach().std().clamp(min=1.0)
+        ema = getattr(train_actor_critic, "_ret_scale", None)
+        if ema is None:
+            ema = target_scale
+        else:
+            ema = 0.99 * ema + 0.01 * target_scale
+        train_actor_critic._ret_scale = ema
     critic_loss = (discount_weight * (values - targets.detach()) ** 2).mean() / (ema ** 2)
 
     # --- ACTOR-LOSS (Gl. 6): REINFORCE mit Baseline + Entropie ---

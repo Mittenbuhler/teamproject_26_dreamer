@@ -186,8 +186,16 @@ def train_actor_critic(world_model, actor, critic, actor_opt, critic_opt, replay
         )
 
     # --- CRITIC-LOSS (Gl. 5): MSE gegen sg(V^lambda), discount-gewichtet ---
-    critic_loss = (discount_weight * (values - targets.detach()) ** 2).mean()
-
+    with torch.no_grad():
+        target_scale = targets.detach().std().clamp(min=1.0)
+        ema = getattr(train_actor_critic, "_ret_scale", None)
+        if ema is None:
+            ema = target_scale
+        else:
+            ema = 0.99 * ema + 0.01 * target_scale
+        train_actor_critic._ret_scale = ema
+    critic_loss = (discount_weight * (values - targets.detach()) ** 2).mean() / (ema ** 2)
+    
     # --- ACTOR-LOSS (Gl. 6): REINFORCE mit Baseline + Entropie ---
     actor_logits = imag["action_logits"]                     # (B, T, A)
     actions = imag["actions"]                                # (B, T, A) one-hot (ST)

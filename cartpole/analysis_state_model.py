@@ -407,7 +407,7 @@ if __name__ == "__main__":
     print("\n[1/5] Berechne Weltmodell-Genauigkeiten ...")
     wm_results = analyze_world_model_accuracy(world_model, test_episodes)
     plot_world_model_accuracy(
-        wm_results, OUTPUT_DIR / "wm_accuracy.png"
+        wm_results, OUTPUT_DIR / f"wm_accuracy_{input_dim}d.png"
     )
 
     print("[2/5] Benchmark: trainierter Actor gegen Zufall ...")
@@ -415,7 +415,7 @@ if __name__ == "__main__":
         world_model, actor, n_episodes=50
     )
     plot_balance_duration(
-        duration_results, OUTPUT_DIR / "balance_duration.png"
+        duration_results, OUTPUT_DIR / f"balance_duration_{input_dim}d.png"
     )
 
     print("[3/5] Berechne Imagination-Drift ...")
@@ -423,20 +423,20 @@ if __name__ == "__main__":
         world_model, test_episodes, horizon=15
     )
     plot_imagination_drift(
-        drift_results, OUTPUT_DIR / "imagination_drift.png"
+        drift_results, OUTPUT_DIR / f"imagination_drift_{input_dim}d.png"
     )
 
     print("[4/5] Erzeuge Traum-vs.-Realität-Vergleich ...")
     plot_qualitative_trajectory(
         world_model,
         test_episodes,
-        OUTPUT_DIR / "trajectory_comparison.png",
+        OUTPUT_DIR / f"trajectory_comparison_{input_dim}d.png",
         horizon=25,
     )
 
     print("[5/5] Erzeuge Policy-Heatmap ...")
     plot_policy_landscape(
-        world_model, actor, OUTPUT_DIR / "policy_landscape.png"
+        world_model, actor, OUTPUT_DIR / f"policy_landscape_{input_dim}d.png"
     )
 
     print("\n" + "=" * 70)

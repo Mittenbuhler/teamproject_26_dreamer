@@ -7,9 +7,9 @@ und rekonstruiert daraus die 4 echten CartPole-Zustandsvariablen. Das Modell
 selbst sieht diese Werte nie in der Analyse -- sie werden aus ep["fulls"]
 entnommen. (Da das Weltmodell jetzt selbst 4D sieht, ist "fulls" == "vis".)
 
-Ausführen mit: python3 -m cartpole_2D.latent_analysis
-Voraussetzung: python3 -m cartpole_2D.main wurde ausgeführt (world_model.pth /
-actor.pth im sprint5/-Ordner).
+Ausführen mit: python3 -m cartpole.latent_analysis --inputs 4
+Voraussetzung: python3 -m cartpole.main --inputs 4 (world_model.pth /
+actor.pth im cartpole/models_saved/-Ordner).
 """
 
 import numpy as np
@@ -26,30 +26,48 @@ from .analysis_state_model import _open_loop_rollout_fixed_actions
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-# Reihenfolge entspricht Gymnasium CartPole: [x, xdot, theta, thetadot]
-STATE_NAMES = ["Position (x)", "Geschw. (ẋ)", "Winkel (θ)", "Winkelgesch. (θ̇)"]
+# Vollständiger Zustand der Gymnasium-Umgebung:
+# [Position, Geschwindigkeit, Winkel, Winkelgeschwindigkeit]
+FULL_STATE_NAMES = [
+    "Position (x)",
+    "Geschwindigkeit (ẋ)",
+    "Winkel (θ)",
+    "Winkelgeschwindigkeit (θ̇)",
+]
 
+# Beobachtungen, die das Weltmodell tatsächlich erhält
+OBS_NAMES_BY_DIM = {
+    2: ["Position (x)", "Winkel (θ)"],
+    4: FULL_STATE_NAMES,
+}
 
 # =============================================================================
 # 1. SETUP
 # =============================================================================
-def load_or_train_model():
-    world_model = RSSM().to(DEVICE)
+
+def load_or_train_model(input_dim: int = 2):
+    if input_dim not in (2, 4):
+        raise ValueError("input_dim muss 2 oder 4 sein.")
+
+    world_model = RSSM(obs_size=input_dim).to(DEVICE)
     feat_size = world_model.stoch_size + world_model.h_size
     actor = Actor(feat_size).to(DEVICE)
 
-    wm_path = SCRIPT_DIR / "world_model.pth"
-    actor_path = SCRIPT_DIR / "actor.pth"
+    suffix = f"{input_dim}d"
+    wm_path = SCRIPT_DIR / "models_saved" / f"world_model_{suffix}.pth"
+    actor_path = SCRIPT_DIR / "models_saved" / f"actor_{suffix}.pth"
 
-    if not (wm_path.exists() and actor_path.exists()):
+    if not wm_path.exists() or not actor_path.exists():
         raise FileNotFoundError(
-            f"\n[FEHLER] Keine trainierten Gewichte in '{SCRIPT_DIR}' gefunden!\n"
-            f"Bitte stelle sicher, dass du zuerst 'main.py' ausführst."
+            f"Gewichte für {input_dim} Inputs fehlen.\n"
+            f"Erwartet:\n{wm_path}\n{actor_path}\n"
+            "Bitte zuerst das entsprechende Modell trainieren."
         )
 
-    print(f" -> Weltmodell/Actor geladen aus {SCRIPT_DIR}")
+    print(f" -> Lade {input_dim}D-Modell aus {SCRIPT_DIR}")
     world_model.load_state_dict(torch.load(wm_path, map_location=DEVICE))
     actor.load_state_dict(torch.load(actor_path, map_location=DEVICE))
+
     world_model.eval()
     actor.eval()
     return world_model, actor
@@ -184,7 +202,7 @@ def train_and_evaluate_decoder(latents: np.ndarray, true_states: np.ndarray,
     print("-" * 72)
 
     results = {}
-    for i, name in enumerate(STATE_NAMES):
+    for i, name in enumerate(FULL_STATE_NAMES):
         mse = mse_per_var[i]
         var = var_per_var[i]
         nmse = nmse_per_var[i]
@@ -236,7 +254,7 @@ def plot_pca(latents: np.ndarray, true_states: np.ndarray, save_path: str = "lat
     fig, axes = plt.subplots(2, 2, figsize=(12, 10))
     fig.suptitle("PCA des Latent Space — Einfärbung nach echten Zuständen", fontsize=14, fontweight="bold")
 
-    for i, (ax, name) in enumerate(zip(axes.flatten(), STATE_NAMES)):
+    for i, (ax, name) in enumerate(zip(axes.flatten(), FULL_STATE_NAMES)):
         sc = ax.scatter(Z2[:, 0], Z2[:, 1], c=true_states[:, i], cmap="RdBu_r", s=8, alpha=0.6)
         plt.colorbar(sc, ax=ax)
         ax.set_title(name, fontsize=11)
@@ -265,11 +283,12 @@ def plot_reconstructions(world_model, episodes, n_steps: int = 8, save_path: str
     T_plot = min(n_steps, recons.shape[0], real.shape[0])
 
     steps = np.arange(1, T_plot + 1)
-    n = len(STATE_NAMES)
+    obs_names = OBS_NAMES_BY_DIM[world_model.obs_size]
+    n = len(obs_names)
     fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4))
     fig.suptitle("Zustands-Rekonstruktion: Echt vs. RSSM-Posterior-Decoder", fontsize=13, fontweight="bold")
 
-    for i, name in enumerate(STATE_NAMES):
+    for i, name in enumerate(obs_names):
         axes[i].plot(steps, real[:T_plot, i], label="Echt", color="black", linewidth=2)
         axes[i].plot(steps, recons[:T_plot, i], label="Rekonstruktion", color="#e67e22", linestyle="--", linewidth=2)
         axes[i].set_title(name, fontsize=10)
@@ -308,13 +327,14 @@ def plot_prior_rollout(world_model, episodes, warmup: int = 5, save_path: str = 
     # echte Zukunft ab warmup+2 (analog zum Drift-Helper)
     real_future = vis[warmup + 2: warmup + 2 + n_plot]
     n_plot = min(n_plot, real_future.shape[0])
+    obs_names = OBS_NAMES_BY_DIM[world_model.obs_size]
 
     steps = np.arange(1, n_plot + 1)
-    n = len(STATE_NAMES)
+    n = len(obs_names)
     fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4))
     fig.suptitle(f"Prior Rollout / Imagination (freies Träumen ab t={warmup})", fontsize=13, fontweight="bold")
 
-    for i, name in enumerate(STATE_NAMES):
+    for i, name in enumerate(obs_names):
         axes[i].plot(steps, real_future[:n_plot, i], label="Echt", color="black", linewidth=2)
         axes[i].plot(steps, imagined[:n_plot, i], label="Geträumt (Prior)", color="#3498db", linestyle="--", linewidth=2)
         axes[i].set_title(name, fontsize=10)
@@ -331,32 +351,81 @@ def plot_prior_rollout(world_model, episodes, warmup: int = 5, save_path: str = 
 # =============================================================================
 # 5. MAIN EXECUTION
 # =============================================================================
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Latent-Space-Analyse für CartPole mit 2 oder 4 Inputs"
+    )
+    parser.add_argument(
+        "--inputs",
+        type=int,
+        choices=[2, 4],
+        default=2,
+        help="Anzahl der Modell-Inputs (2 oder 4)",
+    )
+    args = parser.parse_args()
+    input_dim = args.inputs
+
+    output_dir = SCRIPT_DIR / "plots"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     print("=" * 70)
-    print("Sprint 5 — Latent-Space-Analyse (Vektor-Modell)")
+    print(f"Latent-Space-Analyse — CartPole mit {input_dim} Inputs")
     print("=" * 70)
 
-    world_model, actor = load_or_train_model()
+    world_model, actor = load_or_train_model(input_dim)
 
     env = gym.make("CartPole-v1")
-    print("\nSammle 20 frische Analyse-Episoden aus dem Gymnasium-Env...")
-    # epsilon=1.0: rein zufaellige Aktionen fuer breite Zustandsraum-Abdeckung.
-    episodes = collect_episodes(env, actor, world_model, n_episodes=20, max_steps=150, seed=99, epsilon=1.0)
+    print("\nSammle frische Analyse-Episoden ...")
+    episodes = collect_episodes(
+        env,
+        actor,
+        world_model,
+        n_episodes=20,
+        max_steps=150,
+        seed=99,
+        epsilon=1.0,
+    )
     env.close()
 
-    print("\nExtrahiere verborgene Zustände aus dem RSSM...")
+    print("\nExtrahiere Latent-Zustände ...")
     latents, true_states = extract_latents(world_model, episodes)
-    print(f"  -> Anzahl Datenpunkte: {len(latents)}")
-    print(f"  -> Latent-Dimension (Input-Größe für NN): {latents.shape[1]}")
+    print(f"  -> Datenpunkte: {len(latents)}")
+    print(f"  -> Latent-Dimension: {latents.shape[1]}")
+    print(f"  -> Modell-Inputs: {input_dim}")
+    print(f"  -> Decoder-Zielwerte: {true_states.shape[1]}")
 
-    mse_results = train_and_evaluate_decoder(latents, true_states, epochs=60, batch_size=64, lr=1e-3)
+    mse_results = train_and_evaluate_decoder(
+        latents,
+        true_states,
+        epochs=60,
+        batch_size=64,
+        lr=1e-3,
+    )
 
-    print("\nGeneriere Analyse-Plots...")
-    plot_mse_bars(mse_results, SCRIPT_DIR / "decoder_mse_scores.png")
-    plot_pca(latents, true_states, SCRIPT_DIR / "latent_pca.png")
-    plot_reconstructions(world_model, episodes, n_steps=8, save_path=SCRIPT_DIR / "reconstruction.png")
-    plot_prior_rollout(world_model, episodes, warmup=5, save_path=SCRIPT_DIR / "prior_rollout.png")
+    print("\nGeneriere Analyse-Plots ...")
+    plot_mse_bars(
+        mse_results, output_dir / f"decoder_mse_scores_{input_dim}d.png"
+    )
+    plot_pca(
+        latents, true_states, output_dir / f"latent_pca_{input_dim}d.png"
+    )
+    plot_reconstructions(
+        world_model,
+        episodes,
+        n_steps=8,
+        save_path=output_dir / f"reconstruction_{input_dim}d.png",
+    )
+    plot_prior_rollout(
+        world_model,
+        episodes,
+        warmup=5,
+        save_path=output_dir / f"prior_rollout_{input_dim}d.png",
+    )
 
     print("\n" + "=" * 70)
-    print("Analyse vollständig abgeschlossen. Alle Metriken & Plots aktualisiert.")
+    print(f"Analyse für {input_dim} Inputs abgeschlossen.")
+    print(f"Ergebnisse: {output_dir}")
     print("=" * 70)

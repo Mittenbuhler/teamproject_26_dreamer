@@ -15,8 +15,8 @@ import imageio.v2 as imageio
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont
 
-from .models import RSSM, Actor, DEVICE
-from .data import visible_state, onehot_action
+from ..cartpole_4D.models import RSSM, Actor, DEVICE
+from ..cartpole_4D.data import visible_state, onehot_action
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 

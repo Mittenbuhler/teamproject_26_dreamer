@@ -64,7 +64,7 @@ def make_cartpole_gif(gif_path=None, max_steps=500, seed=0, fps=30,
         n_episodes: mehrere Episoden hintereinander ins selbe GIF
     """
     if gif_path is None:
-        gif_path = SCRIPT_DIR / "cartpole_balance.gif"
+        gif_path = SCRIPT_DIR /"cartpole_balance.gif"
 
 
     # --- Modelle laden ---
@@ -168,7 +168,7 @@ if __name__ == "__main__":
 
     output_path = args.output
     if output_path is None:
-        output_path = SCRIPT_DIR / f"cartpole_balance_{args.inputs}d.gif"
+        output_path = SCRIPT_DIR / "plots" / f"cartpole_balance_{args.inputs}d.gif"
 
     make_cartpole_gif(
         gif_path=output_path,

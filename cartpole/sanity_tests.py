@@ -1,9 +1,9 @@
 import torch
 import numpy as np
 
-from sprint5.data import ReplayBuffer, SequenceDataset
-from sprint5.models import RSSM, Actor
-from sprint5.train import compute_world_model_loss
+from .data import ReplayBuffer, SequenceDataset
+from .models import RSSM, Actor
+from .train import compute_world_model_loss
 
 
 def test_replay_buffer():

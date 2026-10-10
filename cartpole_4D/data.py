@@ -11,8 +11,8 @@ ACTION_SIZE = 2
 FULL_STATE_SIZE = 4  # CartPole: [x, x_dot, theta, theta_dot]
 # Volle 4D-Sicht: das gesamte Dreamer-System (Weltmodell + Policy) arbeitet
 # jetzt auf dem kompletten, markovschen CartPole-Zustand.
-VISIBLE_STATE_INDICES = np.array([0, 1, 2, 3])
-
+VISIBLE_STATE_INDICES = np.array([0, 1, 2, 3]) # different then 2D
+#VISIBLE_STATE_INDICES = np.array([0, 2]) #for 2D
 
 def visible_state(state):
     # 4D-Beobachtung fuer das WELTMODELL (alle Zustandsvariablen).

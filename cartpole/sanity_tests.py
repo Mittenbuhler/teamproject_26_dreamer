@@ -15,6 +15,7 @@ def obs_size(request):
 
 
 def test_replay_buffer():
+    """Testet die Grundfunktionalität des Replay Buffers."""
     rb = ReplayBuffer(capacity=2)
 
     rb.add_episode({"actions": [1, 2]})
@@ -29,6 +30,7 @@ def test_replay_buffer():
 
 @pytest.mark.parametrize("obs_size", [2, 4], ids=["2D", "4D"])
 def test_sequence_dataset_shapes(obs_size):
+    """Überprüft die Tensor-Dimensionen im SequenceDataset."""
     ep = {
         "vis": np.zeros((3, obs_size), dtype=np.float32),
         "actions": [[1, 0], [0, 1]],
@@ -46,6 +48,7 @@ def test_sequence_dataset_shapes(obs_size):
 
 
 def test_rssm_forward_shapes(obs_size):
+    """Überprüft die Ausgabe-Dimensionen beim RSSM Forward-Pass."""
     model = RSSM(obs_size=obs_size)
 
     observations = torch.randn(4, 17, obs_size)
@@ -66,6 +69,7 @@ def test_rssm_forward_shapes(obs_size):
 
 
 def test_imagination_shapes(obs_size):
+    """Überprüft die Dimensionen bei der Imagination im RSSM."""
     model = RSSM(obs_size=obs_size)
 
     start_z, start_h = model.initial(batch_size=3)
@@ -81,6 +85,7 @@ def test_imagination_shapes(obs_size):
 
 
 def test_world_model_loss_is_finite(obs_size):
+    """Prüft, ob der berechnete Weltmodell-Loss endlich (finite) ist."""
     model = RSSM(obs_size=obs_size)
 
     observations = torch.randn(2, 17, obs_size)
@@ -100,6 +105,7 @@ def test_world_model_loss_is_finite(obs_size):
 
 
 def test_gradients_exist(obs_size):
+    """Prüft, ob nach der Rückwärtsrechnung Gradienten im Modell vorhanden sind."""
     model = RSSM(obs_size=obs_size)
 
     observations = torch.randn(2, 17, obs_size)

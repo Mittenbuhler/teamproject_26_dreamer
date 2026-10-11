@@ -1,4 +1,3 @@
-
 import time
 
 import gymnasium as gym
@@ -27,6 +26,7 @@ def make_model(obs_size):
 
 
 def test_world_model_training_reduces_loss(obs_size):
+    """Testet, ob das Training des Weltmodells den Loss verringert."""
     env = gym.make("CartPole-v1")
     try:
         world_model = make_model(obs_size)
@@ -62,6 +62,7 @@ def test_world_model_training_reduces_loss(obs_size):
 
 
 def test_actor_training_does_not_degrade_return_too_much(obs_size):
+    """Testet, ob das Actor-Training den Return nicht übermäßig verschlechtert."""
     env = gym.make("CartPole-v1")
     try:
         replay = ReplayBuffer(100)
@@ -112,6 +113,7 @@ def test_actor_training_does_not_degrade_return_too_much(obs_size):
 
 
 def test_inference_speed(obs_size):
+    """Misst die Inferenzgeschwindigkeit des Actors."""
     world_model = make_model(obs_size)
     actor = Actor(world_model.stoch_size + world_model.h_size)
     x = torch.randn(1, world_model.stoch_size + world_model.h_size)
@@ -131,6 +133,7 @@ def test_inference_speed(obs_size):
 
 
 def test_imagination_runtime(obs_size):
+    """Misst die Laufzeit der Modell-Imagination."""
     world_model = make_model(obs_size)
     actor = Actor(world_model.stoch_size + world_model.h_size)
     z, h = world_model.initial(batch_size=32)
@@ -145,6 +148,7 @@ def test_imagination_runtime(obs_size):
 
 
 def test_final_policy_reaches_reasonable_return(obs_size):
+    """Prüft eine grundlegende untere Schranke für den Return."""
     env = gym.make("CartPole-v1")
     try:
         world_model = make_model(obs_size)

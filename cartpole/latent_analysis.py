@@ -5,7 +5,7 @@ Latent-Space-Analyse des trainierten Dreamer-Modells.
 Idee: ein separates PyTorch-NN "sondiert" den RSSM-Latentraum (stoch + deter)
 und rekonstruiert daraus die 4 echten CartPole-Zustandsvariablen. Das Modell
 selbst sieht diese Werte nie in der Analyse -- sie werden aus ep["fulls"]
-entnommen. (Da das Weltmodell jetzt selbst 4D sieht, ist "fulls" == "vis".)
+entnommen.
 
 Ausführen mit: python3 -m cartpole.latent_analysis --inputs 4
 Voraussetzung: python3 -m cartpole.main --inputs 4 (world_model.pth /
@@ -46,6 +46,7 @@ OBS_NAMES_BY_DIM = {
 # =============================================================================
 
 def load_or_train_model(input_dim: int = 2):
+    """Lädt das Weltmodell und den Actor für die Latent-Analyse."""
     if input_dim not in (2, 4):
         raise ValueError("input_dim muss 2 oder 4 sein.")
 
@@ -124,6 +125,7 @@ def extract_latents(world_model, episodes):
 # 3. PYTORCH NN DECODER (DIE SONDE)
 # =============================================================================
 class LatentDecoderNN(nn.Module):
+    """Sonden-Netzwerk (Decoder) zur Rekonstruktion der echten Zustände aus dem Latentraum."""
     def __init__(self, input_dim: int, output_dim: int = 4):
         super().__init__()
         self.decoder = nn.Sequential(
@@ -217,6 +219,7 @@ def train_and_evaluate_decoder(latents: np.ndarray, true_states: np.ndarray,
 # 4. VISUALISIERUNGEN
 # =============================================================================
 def plot_mse_bars(mse_results: dict, save_path: str = "decoder_mse_scores.png"):
+    """Erstellt Balkendiagramme für die MSE- und NMSE-Ergebnisse des Decoders."""
     names = list(mse_results.keys())
     mse_vals = [mse_results[n]["mse"] for n in names]
     nmse_vals = [mse_results[n]["nmse"] for n in names]
@@ -248,6 +251,7 @@ def plot_mse_bars(mse_results: dict, save_path: str = "decoder_mse_scores.png"):
 
 
 def plot_pca(latents: np.ndarray, true_states: np.ndarray, save_path: str = "latent_pca.png"):
+    """Führt eine PCA auf dem Latentraum aus und färbt die Punkte nach den wahren Zuständen ein."""
     pca = PCA(n_components=2)
     Z2 = pca.fit_transform(latents)
 

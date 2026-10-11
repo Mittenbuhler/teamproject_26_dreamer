@@ -8,13 +8,17 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 C = 4
 K = 8
 STOCHASTIC_SIZE = C * K
-DETERMINISTIC_SIZE = 64   # war 8: zu klein, um die Aktionsdynamik zu tragen.
+DETERMINISTIC_SIZE = 64   # Ausreichend dimensioniert für die Aktionsdynamik
 HIDDEN_SIZE = 256
-OBSERVATION_SIZE = 4 # Standartwert
+OBSERVATION_SIZE = 4      # Standardwert (wählt dynamisch 2D oder 4D)
 ACTION_SIZE = 2
 
 
 class RSSM(nn.Module):
+    """
+    Recurrent State Space Model (RSSM) für DreamerV2.
+    Unterstützt sowohl 2D- als auch 4D-Beobachtungen über das Argument `obs_size`.
+    """
     def __init__(
         self,
         categorical_size=C,
@@ -31,9 +35,10 @@ class RSSM(nn.Module):
         self.stoch_size = stoch_size
         self.h_size = deter_size
         self.hid = hidden_size
-        self.obs_size = obs_size
+        self.obs_size = obs_size  # Bestimmt, ob 2 oder 4 Werte eingelesen/vorhergesagt werden
         self.action_size = action_size
 
+        # Stack für die Verarbeitung von stochastischem Zustand + letzter Aktion
         self.action_stack = nn.Sequential(
             nn.Linear(self.stoch_size + self.action_size, self.hid),
             nn.ReLU(),
@@ -41,13 +46,15 @@ class RSSM(nn.Module):
         )
         self.gru = nn.GRUCell(self.h_size, self.h_size)
 
+        # Prior-Modell (sagt den nächsten stochastischen Zustand ohne echte Beobachtung voraus)
         self.prior_model = nn.Sequential(
             nn.Linear(self.h_size, self.hid),
             nn.ReLU(),
             nn.Linear(self.hid, self.C * self.K),
         )
+        # Posterior-Modell (kombiniert deterministischen Zustand und echte Beobachtung)
         self.posterior_model = nn.Sequential(
-            nn.Linear(self.h_size + self.obs_size, self.hid),
+            nn.Linear(self.h_size + self.obs_size, self.hid), # Passt sich dynamisch an obs_size an!
             nn.ReLU(),
             nn.Linear(self.hid, self.C * self.K),
         )
@@ -56,11 +63,13 @@ class RSSM(nn.Module):
             nn.Linear(self.stoch_size + self.h_size, self.hid),
             nn.ReLU(),
         )
+        # Prediction Heads für Observation (2D oder 4D), Reward und Continue-Signal
         self.observation_head = nn.Linear(self.hid, self.obs_size)
         self.reward_head = nn.Linear(self.hid, 1)
         self.continue_head = nn.Linear(self.hid, 1)
 
     def initial(self, batch_size=1, device=None):
+        """Gibt den initialen Null-Zustand für RSSM zurück."""
         dev = device or DEVICE
         return (
             torch.zeros(batch_size, self.stoch_size, device=dev),
@@ -76,6 +85,7 @@ class RSSM(nn.Module):
         return z.view(B, self.C * self.K)
 
     def sample_straight_through(self, logits):
+        """Straight-Through Gumbel-Softmax / Multinomial Sampling."""
         probs = F.softmax(logits, dim=-1)
         B, C, K = probs.shape
         idx = torch.multinomial(probs.view(B * C, K), num_samples=1).squeeze(-1)
@@ -83,6 +93,7 @@ class RSSM(nn.Module):
         return onehot.detach() - probs.detach() + probs
 
     def mode_one_hot(self, logits):
+        """Deterministische Auswahl (Argmax) als One-Hot-Vektor."""
         idx = logits.argmax(dim=-1)
         return F.one_hot(idx, num_classes=self.K).float().to(logits.device)
 
@@ -95,6 +106,7 @@ class RSSM(nn.Module):
         }
 
     def observe_forward(self, observations, actions):
+        """Führt einen Forward-Pass über eine Sequenz im Posterior-Modus aus."""
         B, T = observations.shape[0], actions.shape[1]
         flatz, h = self.initial(batch_size=B, device=observations.device)
 
@@ -137,6 +149,7 @@ class RSSM(nn.Module):
 
     @torch.no_grad()
     def posterior_start_state(self, observations, actions, t0=0):
+        """Baut den Startzustand über Posterior-Updates bis Zeitschritt t0 auf."""
         flatz, h = self.initial(batch_size=observations.shape[0], device=observations.device)
         for t in range(t0 + 1):
             act_t = actions[:, t, :]
@@ -150,17 +163,7 @@ class RSSM(nn.Module):
 
     @torch.no_grad()
     def act_step(self, prev_flatz, prev_h, prev_action, obs):
-        """Ein RSSM-Schritt beim Handeln in der echten Umgebung.
-
-        Nimmt den vorigen Latent-Zustand (prev_flatz, prev_h), die zuletzt
-        ausgefuehrte Aktion (one-hot) und die NEUE Beobachtung. Schreibt den
-        deterministischen Zustand fort und korrigiert den stochastischen Zustand
-        ueber den Posterior mit der neuen Beobachtung. Liefert den neuen
-        (flatz, h) sowie das Policy-Feature [flatz, h].
-
-        Damit sieht die Policy beim Handeln GENAU dieselbe Repraesentation wie
-        im Imagination-Training -- keine separate ObsActor-Kodierung noetig.
-        """
+        """Ein einzelner Interaktionsschritt in der echten Umgebung."""
         h = self.gru(self.action_stack(torch.cat([prev_flatz, prev_action], dim=-1)), prev_h)
         posterior_logits = self.logits_to_shape(
             self.posterior_model(torch.cat([h, obs], dim=-1))
@@ -170,6 +173,7 @@ class RSSM(nn.Module):
         return flatz, h, feat
 
     def imagine(self, start_flatz, start_h, actor, horizon=15):
+        """Träumt Trajektorien im latenten Raum für das Actor-Critic-Training."""
         flatz, h = start_flatz, start_h
         feats, rewards, discounts, action_logits_list, actions = [], [], [], [], []
 
@@ -207,6 +211,7 @@ class RSSM(nn.Module):
 
 
 class Actor(nn.Module):
+    """Actor-Netzwerk zur Aktionsauswahl basierend auf RSSM-Features."""
     def __init__(self, input_size, hidden_size=128, num_actions=ACTION_SIZE):
         super().__init__()
         self.net = nn.Sequential(
@@ -222,6 +227,7 @@ class Actor(nn.Module):
 
 
 class Critic(nn.Module):
+    """Critic-Netzwerk zur Schätzung des erwarteten Returns (Value-Function)."""
     def __init__(self, input_size, hidden_size=128):
         super().__init__()
         self.net = nn.Sequential(

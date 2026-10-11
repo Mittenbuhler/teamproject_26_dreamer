@@ -21,6 +21,7 @@ def compute_world_model_loss(model_out, observations, rewards, continues,
                              priorscale=PRIOR_SCALE, klscale=KL_SCALE,
                              rewardscale=REWARD_SCALE, continuescale=CONTINUE_SCALE, alpha=ALPHA_KL,
                              mask=None):
+    """Berechnet den Gesamtverlust (Loss) für das Weltmodell aus Prior, Posterior und KL-Divergenz."""
     prior_logits = model_out["prior_logits"]
     posterior_logits = model_out["posterior_logits"]
     prior_preds = model_out["prior_predictions"]
@@ -100,6 +101,7 @@ def lambda_return(rewards, values, discounts, bootstrap, lam=LAMBDA):
 
 
 def train_world_model(model, optimizer, replay_buffer, seq_len=16, batch_size=8, epochs_per_phase=1):
+    """Trainiert das RSSM Weltmodell auf Sequenzen aus dem Replay Buffer."""
     from .data import SequenceDataset
     if len(replay_buffer) == 0:
         return {}
@@ -126,6 +128,7 @@ def train_world_model(model, optimizer, replay_buffer, seq_len=16, batch_size=8,
 def train_actor_critic(world_model, actor, critic, actor_opt, critic_opt, replay_buffer,
                        imagination_horizon=15, warmup_steps=5, sample_episodes=4,
                        entropy_coeff=0.02, clip_norm=0.5, rho=1.0):
+    """Trainiert den Actor und Critic in geträumten Trajektorien (Imagination) des Weltmodells."""
     if len(replay_buffer) == 0:
         return {}
     world_model.eval()

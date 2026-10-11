@@ -1,6 +1,6 @@
 """
-analysis_state_model.py — Sprint 5
-Analyse-Skript für das 2D-basierte Dreamer-Modell.
+analysis_state_model.py 
+Analyse-Skript für das 2D und 4D-basierte Dreamer-Modell.
 
 zuerst main ausführen: "python3 -m cartpole.main --inputs 4 (damit man Gewichte hat)
 Ausführen mit: "python -m cartpole.analysis_state_model --inputs 4" bzw. 2
@@ -16,6 +16,7 @@ from pathlib import Path
 from .models import RSSM, Actor, Critic, DEVICE
 from .data import SequenceDataset, collect_episodes, visible_state, onehot_action
 
+# Zuordnung der Variablennamen je nach Beobachtungsdimension (2D oder 4D)
 VAR_NAMES_BY_DIM = {
     2: ["Position (x)", "Winkel (θ)"],
     4: [
@@ -35,6 +36,7 @@ OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 # =============================================================================
 
 def load_or_train(input_dim: int = 2):
+    """Lädt das vortrainierte Weltmodell, den Actor und Critic für die gewählte Dimension."""
     if input_dim not in (2, 4):
         raise ValueError("input_dim muss 2 oder 4 sein.")
 
@@ -70,6 +72,7 @@ def load_or_train(input_dim: int = 2):
 # =============================================================================
 @torch.no_grad()
 def analyze_world_model_accuracy(world_model, episodes, seq_len: int = 16, batch_size: int = 16):
+    """Evaluiert die Vorhersagefehler des Weltmodells für Posterior (mit Beobachtung) und Prior (ohne)."""
     world_model.eval()
     dataset = SequenceDataset(episodes, seq_len=seq_len)
     if len(dataset) == 0:
@@ -107,6 +110,7 @@ def analyze_world_model_accuracy(world_model, episodes, seq_len: int = 16, batch
 
 
 def plot_world_model_accuracy(results: dict, save_path: str):
+    """Erstellt Plots zur Visualisierung der Weltmodell-Genauigkeit (MSE und Continue-Genauigkeit)."""
     post_vals = list(results["obs_mse_posterior"]) + [results["reward_mse_posterior"]]
     prior_vals = list(results["obs_mse_prior"]) + [results["reward_mse_prior"]]
 
@@ -147,6 +151,7 @@ def plot_world_model_accuracy(results: dict, save_path: str):
 # 2. Balance-Dauer
 # =============================================================================
 def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps: int = 500):
+    """Vergleicht die Überlebensdauer des trainierten Agenten mit einer Zufallsstrategie in der echten Umgebung."""
     env = gym.make("CartPole-v1")
 
     def trained_rollout():
@@ -190,6 +195,7 @@ def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps
 
 
 def plot_balance_duration(results: dict, save_path: str):
+    """Erstellt ein Histogramm der erreichten Überlebensschritte (Actor vs. Zufall)."""
     trained, random_ = results["trained"], results["random"]
     fig, ax = plt.subplots(figsize=(8, 4.5))
     bins = np.arange(0, 510, 20)
@@ -209,6 +215,7 @@ def plot_balance_duration(results: dict, save_path: str):
 # =============================================================================
 @torch.no_grad()
 def _open_loop_rollout_fixed_actions(world_model, start_flatz, start_h, real_actions):
+    """Führt eine reine Open-Loop-Imagination (Prior-Rollout) mit vorgegebenen Aktionen durch."""
     flatz, h = start_flatz, start_h
     obs_preds = []
     for t in range(real_actions.shape[1]):
@@ -223,6 +230,7 @@ def _open_loop_rollout_fixed_actions(world_model, start_flatz, start_h, real_act
 
 @torch.no_grad()
 def analyze_imagination_drift(world_model, episodes, horizon: int = 15):
+    """Misst den akkumulierten Fehler (Drift) bei mehrschrittiger Zukunftsvorhersage im Modell."""
     world_model.eval()
     usable = [ep for ep in episodes if len(ep["actions"]) >= horizon + 1][:20]
     per_step_errors = []
@@ -249,6 +257,7 @@ def analyze_imagination_drift(world_model, episodes, horizon: int = 15):
 
 
 def plot_imagination_drift(results: dict, save_path: str):
+    """Plottet den ansteigenden Fehler (Drift) über den Imaginatios-Horizont."""
     mean_err, std_err = results["mean"], results["std"]
     steps = np.arange(1, len(mean_err) + 1)
     fig, ax = plt.subplots(figsize=(8, 4.5))
@@ -268,6 +277,7 @@ def plot_imagination_drift(results: dict, save_path: str):
 # =============================================================================
 @torch.no_grad()
 def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, horizon: int = 25):
+    """Vergleicht eine echte Test-Trajektorie direkt mit der Modell-Vorhersage (Traum)."""
     world_model.eval()
     var_names = VAR_NAMES_BY_DIM[world_model.obs_size]
     ep = max(test_episodes, key=lambda e: len(e["actions"]))
@@ -309,6 +319,7 @@ def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, hori
 
 @torch.no_grad()
 def plot_policy_landscape(world_model, actor, save_path: str):
+    """Erstellt eine Heatmap der Policy-Entscheidungen über den Position-Winkel-Zustandsraum."""
     world_model.eval()
     actor.eval()
 

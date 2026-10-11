@@ -53,6 +53,7 @@ LR_CRITIC = 1e-4  # DreamerV2 critic lr
 
 @dataclass
 class TrainConfig:
+    """Konfigurationsparameter für das Training des DreamerV2-Modells."""
     iterations: int = 200                  # laenger trainieren fuer ~200 Reward
     epochs_per_phase: int = 4
     batch_size: int = 32
@@ -82,6 +83,7 @@ class TrainConfig:
 
 
 def build_actor_critic(world_model):
+    """Erstellt den Actor und Critic basierend auf den Latent-Dimensionen des Weltmodells."""
     feat_size = world_model.stoch_size + world_model.h_size
     actor = Actor(feat_size).to(DEVICE)
     critic = Critic(feat_size).to(DEVICE)
@@ -93,6 +95,7 @@ def build_actor_critic(world_model):
 
 
 def iterative_train(cfg=None, input_dim=4):
+    """Führt das iterative Training von Weltmodell, Actor und Critic aus."""
     if input_dim not in (2, 4):
         raise ValueError("input_dim muss 2 oder 4 sein.")
 

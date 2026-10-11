@@ -33,25 +33,30 @@ def full_state(state):
 
 
 def onehot_action(a, action_size=ACTION_SIZE):
+    """Konvertiert eine diskrete Aktion in einen One-Hot-Vektor."""
     v = np.zeros(action_size, dtype=np.float32)
     v[a] = 1.0
     return v
 
 
 class ReplayBuffer:
+    """Speicher für gesammelte Episoden (Erfahrungsspeicher)."""
     def __init__(self, capacity=300):
         self.buffer = deque(maxlen=capacity)
 
     def add_episode(self, ep):
+        """Fügt eine neue Episode zum Buffer hinzu."""
         self.buffer.append(ep)
 
     def __len__(self):
         return len(self.buffer)
 
     def sample_episode(self):
+        """Zieht zufällig eine einzelne Episode."""
         return random.choice(self.buffer)
 
     def sample_episodes(self, n):
+        """Zieht zufällig n Episoden aus dem Buffer."""
         if len(self.buffer) == 0:
             return []
         n = min(n, len(self.buffer))
@@ -87,6 +92,7 @@ class SequenceDataset(Dataset):
         return len(self.index)
 
     def __getitem__(self, idx):
+        """Gibt ein Sequenzfenster als Tensor-Dictionary zurück."""
         ep, start, needs_pad = self.index[idx]
         obs = np.array(ep["vis"], dtype=np.float32)
         acts = np.array(ep["actions"], dtype=np.float32)

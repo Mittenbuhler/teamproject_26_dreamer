@@ -5,7 +5,7 @@ Laedt die trainierten Gewichte (world_model.pth, actor.pth) und laesst den
 Agenten ueber den kanonischen RSSM-Handel-Pfad spielen (wie evaluate_policy),
 rendert dabei jeden Frame und speichert alles als GIF.
 
-Ausfuehren (aus dem Ordner ueber sprint5/):
+Ausführen (aus dem Ordner über cartpole/):
     python -m cartpole.make_gif --inputs 4
 """
 import argparse

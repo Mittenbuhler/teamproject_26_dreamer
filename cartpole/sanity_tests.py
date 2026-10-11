@@ -6,9 +6,9 @@ import torch
 from cartpole.data import ReplayBuffer, SequenceDataset
 from cartpole.models import RSSM, Actor
 from cartpole.train import compute_world_model_loss
-
-# ausführen mit: python -m pytest cartpole/sanity_tests.py -v
-
+"""
+ausführen mit: python -m pytest cartpole/sanity_tests.py -v
+"""
 @pytest.fixture(params=[2, 4], ids=["2D", "4D"])
 def obs_size(request):
     return request.param

@@ -1,5 +1,5 @@
 """
-latent_analysis.py — Sprint 5 (auf Vektor-Modell portiert)
+latent_analysis.py — cartpole (auf Vektor-Modell portiert)
 Latent-Space-Analyse des trainierten Dreamer-Modells.
 
 Idee: ein separates PyTorch-NN "sondiert" den RSSM-Latentraum (stoch + deter)

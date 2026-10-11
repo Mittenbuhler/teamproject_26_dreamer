@@ -5,10 +5,10 @@ import gymnasium as gym
 import pytest
 import torch
 import torch.optim as optim
-
-# Ausführen mit:
-# python -m pytest cartpole/performance_tests.py -v
-
+"""
+ Ausführen mit:
+ python -m pytest cartpole/performance_tests.py -v
+"""
 from cartpole.main import evaluate_policy, build_actor_critic
 from cartpole.models import RSSM, Actor
 from cartpole.data import ReplayBuffer, collect_episodes

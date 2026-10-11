@@ -6,7 +6,10 @@ from .models import RSSM, Actor, Critic, DEVICE
 from .data import ReplayBuffer, collect_episodes, visible_state, onehot_action
 from .train import train_world_model, train_actor_critic
 
-"""ausführen mit command: python -m cartpole_2D.main"""
+"""ausführen mit command: python3 -m cartpole.main --inputs 4
+
+   wobei 2 für 2D steht und 4 für 4D
+"""
 
 
 def evaluate_policy(env, world_model, actor, episodes=5, max_steps=200):
@@ -14,6 +17,7 @@ def evaluate_policy(env, world_model, actor, episodes=5, max_steps=200):
     wird ueber die Episode mitgefuehrt, die Policy handelt auf [flatz, h]."""
     world_model.eval()
     actor.eval()
+    obs_size = world_model.obs_size
     returns = []
     for ep_idx in range(episodes):
         obs, _ = env.reset(seed=ep_idx)
@@ -23,7 +27,7 @@ def evaluate_policy(env, world_model, actor, episodes=5, max_steps=200):
 
         flatz, h = world_model.initial(batch_size=1, device=DEVICE)
         prev_action = torch.zeros(1, world_model.action_size, device=DEVICE)
-        obs_t = torch.tensor(visible_state(obs), dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        obs_t = torch.tensor(visible_state(obs,obs_size), dtype=torch.float32, device=DEVICE).unsqueeze(0)
         flatz, h, feat = world_model.act_step(flatz, h, prev_action, obs_t)
 
         while not done and steps < max_steps:
@@ -36,7 +40,7 @@ def evaluate_policy(env, world_model, actor, episodes=5, max_steps=200):
             steps += 1
 
             prev_action = torch.tensor(onehot_action(action), dtype=torch.float32, device=DEVICE).unsqueeze(0)
-            obs_t = torch.tensor(visible_state(obs), dtype=torch.float32, device=DEVICE).unsqueeze(0)
+            obs_t = torch.tensor(visible_state(obs,obs_size), dtype=torch.float32, device=DEVICE).unsqueeze(0)
             flatz, h, feat = world_model.act_step(flatz, h, prev_action, obs_t)
         returns.append(total_reward)
     return sum(returns) / len(returns)
@@ -88,11 +92,17 @@ def build_actor_critic(world_model):
     return actor, critic
 
 
-def iterative_train(cfg=TrainConfig()):
+def iterative_train(cfg=None, input_dim=4):
+    if input_dim not in (2, 4):
+        raise ValueError("input_dim muss 2 oder 4 sein.")
+
+    if cfg is None:
+        cfg = TrainConfig()
+
     env = gym.make("CartPole-v1")
     replay_buffer = ReplayBuffer(cfg.replay_capacity)
 
-    world_model = RSSM().to(DEVICE)
+    world_model = RSSM(obs_size=input_dim).to(DEVICE)
     actor, critic = build_actor_critic(world_model)
 
     # frisches Target-Netzwerk pro Trainingslauf
@@ -187,14 +197,44 @@ def iterative_train(cfg=TrainConfig()):
     return world_model, actor, critic
 
 
-if __name__ == "__main__":
-    # Startet das ausführliche Training
-    world_model, actor, critic = iterative_train()
 
-    # Speichern für die Analyse-Skripte
+if __name__ == "__main__":
+    import argparse
     from pathlib import Path
-    save_dir = Path(__file__).resolve().parent
-    torch.save(world_model.state_dict(), save_dir / "world_model.pth")
-    torch.save(actor.state_dict(), save_dir / "actor.pth")
-    torch.save(critic.state_dict(), save_dir / "critic.pth")
-    print(f"\n[INFO] Modelle erfolgreich in {save_dir} für die Analyse gesichert!")
+
+    parser = argparse.ArgumentParser(
+        description="CartPole DreamerV2 mit 2D- oder 4D-Beobachtungen"
+    )
+    parser.add_argument(
+        "--inputs",
+        type=int,
+        choices=[2, 4],
+        default=4,
+        help="Anzahl der Beobachtungswerte (2 oder 4)"
+    )
+    args = parser.parse_args()
+
+    input_dim = args.inputs
+    print(f"Starte CartPole-Training mit {input_dim} Inputs.")
+
+    world_model, actor, critic = iterative_train(
+        input_dim=input_dim
+    )
+
+    save_dir = Path(__file__).resolve().parent / "models_saved"
+    save_dir.mkdir(parents=True, exist_ok=True)
+
+    torch.save(
+        world_model.state_dict(),
+        save_dir / f"world_model_{input_dim}d.pth"
+    )
+    torch.save(
+        actor.state_dict(),
+        save_dir / f"actor_{input_dim}d.pth"
+    )
+    torch.save(
+        critic.state_dict(),
+        save_dir / f"critic_{input_dim}d.pth"
+    )
+
+    print(f"Modelle für {input_dim}D gespeichert in: {save_dir}")

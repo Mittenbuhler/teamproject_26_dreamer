@@ -9,19 +9,27 @@ from .models import DEVICE
 
 ACTION_SIZE = 2
 FULL_STATE_SIZE = 4  # CartPole: [x, x_dot, theta, theta_dot]
-# Volle 4D-Sicht: das gesamte Dreamer-System (Weltmodell + Policy) arbeitet
-# jetzt auf dem kompletten, markovschen CartPole-Zustand.
-VISIBLE_STATE_INDICES = np.array([0, 2])  # angepasst auf 2D-Umgebung
 
 
-def visible_state(state):
-    # 2D-Beobachtung fuer das WELTMODELL (filtert nur Position und Winkel heraus)
-    return np.array(state, dtype=np.float32)[VISIBLE_STATE_INDICES]
+VISIBLE_STATE_INDICES = {
+    2: np.array([0, 2]),       # Wagenposition und Stangenwinkel
+    4: np.array([0, 1, 2, 3])  # alle vier Zustandswerte
+}
+
+
+def visible_state(state, obs_size=4):
+    """Gibt die für das Weltmodell sichtbaren Zustände zurück."""
+    if obs_size not in VISIBLE_STATE_INDICES:
+        raise ValueError("obs_size muss 2 oder 4 sein.")
+
+    return np.asarray(
+        state, dtype=np.float32
+    )[VISIBLE_STATE_INDICES[obs_size]]
 
 
 def full_state(state):
-    # 4D-Beobachtung fuer die POLICY (identisch zu visible_state).
-    return np.array(state, dtype=np.float32)
+    """Gibt den vollständigen CartPole-Zustand zurück."""
+    return np.asarray(state, dtype=np.float32)
 
 
 def onehot_action(a, action_size=ACTION_SIZE):
@@ -126,6 +134,7 @@ def _act_in_env(env, world_model, actor, n_episodes, max_steps, seed, epsilon):
     episodes = []
     world_model.eval()
     actor.eval()
+    obs_size = world_model.obs_size
     for ep_idx in range(n_episodes):
         obs, _ = env.reset(seed=None if seed is None else seed + ep_idx)
         ep = {"fulls": [], "vis": [], "actions": [], "rewards": [], "continues": []}
@@ -135,7 +144,7 @@ def _act_in_env(env, world_model, actor, n_episodes, max_steps, seed, epsilon):
         prev_action = torch.zeros(1, world_model.action_size, device=DEVICE)
 
         # Ersten Zustand ins RSSM geben (erster act_step mit Start-Obs).
-        obs_t = torch.tensor(visible_state(obs), dtype=torch.float32, device=DEVICE).unsqueeze(0)
+        obs_t = torch.tensor(visible_state(obs, obs_size), device=DEVICE).unsqueeze(0)
         flatz, h, feat = world_model.act_step(flatz, h, prev_action, obs_t)
 
         done = False
@@ -152,21 +161,21 @@ def _act_in_env(env, world_model, actor, n_episodes, max_steps, seed, epsilon):
             done = terminated or truncated
 
             ep["fulls"].append(obs)
-            ep["vis"].append(visible_state(obs))
+            ep["vis"].append(visible_state(obs, obs_size))            
             ep["actions"].append(onehot_action(a))
             ep["rewards"].append([r])
             ep["continues"].append([0.0 if done else 1.0])
 
             # RSSM-Zustand mit der ausgefuehrten Aktion + neuer Beobachtung fortschreiben.
             prev_action = torch.tensor(onehot_action(a), dtype=torch.float32, device=DEVICE).unsqueeze(0)
-            next_obs_t = torch.tensor(visible_state(next_full), dtype=torch.float32, device=DEVICE).unsqueeze(0)
+            next_obs_t = torch.tensor(visible_state(next_full, obs_size),dtype=torch.float32,device=DEVICE).unsqueeze(0)
             flatz, h, feat = world_model.act_step(flatz, h, prev_action, next_obs_t)
 
             obs = next_full
             steps += 1
 
         ep["fulls"].append(obs)
-        ep["vis"].append(visible_state(obs))
+        ep["vis"].append(visible_state(obs, obs_size))
         episodes.append(ep)
     return episodes
 
@@ -185,13 +194,14 @@ def collect_episodes(env, actor, world_model=None, n_episodes=10, max_steps=200,
 
     episodes = []
     actor.eval()
+    obs_size = world_model.obs_size
     for ep_idx in range(n_episodes):
         obs, _ = env.reset(seed=None if seed is None else seed + ep_idx)
         ep = {"fulls": [], "vis": [], "actions": [], "rewards": [], "continues": []}
         done = False
         steps = 0
         while not done and steps < max_steps:
-            x = torch.tensor(visible_state(obs), dtype=torch.float32).unsqueeze(0)
+            x = torch.tensor(visible_state(obs,obs_size), dtype=torch.float32).unsqueeze(0)
             with torch.no_grad():
                 logits = actor(x)
                 if random.random() < epsilon:
@@ -201,13 +211,13 @@ def collect_episodes(env, actor, world_model=None, n_episodes=10, max_steps=200,
             next_full, r, terminated, truncated, _ = env.step(a)
             done = terminated or truncated
             ep["fulls"].append(obs)
-            ep["vis"].append(visible_state(obs))
+            ep["vis"].append(visible_state(obs,obs_size))
             ep["actions"].append(onehot_action(a))
             ep["rewards"].append([r])
             ep["continues"].append([0.0 if done else 1.0])
             obs = next_full
             steps += 1
         ep["fulls"].append(obs)
-        ep["vis"].append(visible_state(obs))
+        ep["vis"].append(visible_state(obs,obs_size))
         episodes.append(ep)
     return episodes

@@ -10,7 +10,7 @@ K = 8
 STOCHASTIC_SIZE = C * K
 DETERMINISTIC_SIZE = 64   # war 8: zu klein, um die Aktionsdynamik zu tragen.
 HIDDEN_SIZE = 256
-OBSERVATION_SIZE = 2 # Änderung 2D
+OBSERVATION_SIZE = 4 # Standartwert
 ACTION_SIZE = 2
 
 

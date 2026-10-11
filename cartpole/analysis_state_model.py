@@ -1,9 +1,9 @@
 """
 analysis_state_model.py — Sprint 5
-Analyse-Skript für das (jetzt voll 4D-basierte) Dreamer-Modell.
+Analyse-Skript für das 2D-basierte Dreamer-Modell.
 
-zuerst main ausführen: python -m cartpole_4D.main (damit man Gewichte hat)
-Ausführen mit: python -m cartpole_4D.analysis_state_model
+zuerst main ausführen: "python3 -m cartpole.main --inputs 4 (damit man Gewichte hat)
+Ausführen mit: "python -m cartpole.analysis_state_model --inputs 4" bzw. 2
 """
 
 import numpy as np
@@ -16,37 +16,52 @@ from pathlib import Path
 from .models import RSSM, Actor, Critic, DEVICE
 from .data import SequenceDataset, collect_episodes, visible_state, onehot_action
 
-# Beobachtung ist jetzt der volle 4D-CartPole-Zustand.
-VAR_NAMES = ["Position (x)", "Geschw. (ẋ)", "Winkel (θ)", "Winkelgesch. (θ̇)"]
+VAR_NAMES_BY_DIM = {
+    2: ["Position (x)", "Winkel (θ)"],
+    4: [
+        "Position (x)",
+        "Geschwindigkeit (ẋ)",
+        "Winkel (θ)",
+        "Winkelgeschwindigkeit (θ̇)",
+    ],
+}
 SCRIPT_DIR = Path(__file__).resolve().parent
+OUTPUT_DIR = SCRIPT_DIR / "plots"
+OUTPUT_DIR.mkdir(exist_ok=True, parents=True)
 
 
 # =============================================================================
 # Setup / Modell-Loader
 # =============================================================================
-def load_or_train():
-    world_model = RSSM().to(DEVICE)
+
+def load_or_train(input_dim: int = 2):
+    if input_dim not in (2, 4):
+        raise ValueError("input_dim muss 2 oder 4 sein.")
+
+    world_model = RSSM(obs_size=input_dim).to(DEVICE)
     feat_size = world_model.stoch_size + world_model.h_size
     actor = Actor(feat_size).to(DEVICE)
     critic = Critic(feat_size).to(DEVICE)
 
-    wm_path = SCRIPT_DIR / "world_model.pth"
-    actor_path = SCRIPT_DIR / "actor.pth"
-    critic_path = SCRIPT_DIR / "critic.pth"
+    suffix = f"{input_dim}d"
+    wm_path = SCRIPT_DIR / "models_saved" / f"world_model_{suffix}.pth"
+    actor_path = SCRIPT_DIR / "models_saved" / f"actor_{suffix}.pth"
+    critic_path = SCRIPT_DIR / "models_saved" / f"critic_{suffix}.pth"
 
-    if not (wm_path.exists() and actor_path.exists()):
+    required_paths = [wm_path, actor_path, critic_path]
+    missing = [str(p) for p in required_paths if not p.exists()]
+    if missing:
         raise FileNotFoundError(
-            f"\n[FEHLER] Keine trainierten Gewichte in '{SCRIPT_DIR}' gefunden!\n"
-            f"Bitte stelle sicher, dass du zuerst 'main.py' ausführst."
+            "Gewichtsdateien fehlen:\n"
+            + "\n".join(missing)
+            + "\nBitte zuerst das Training für diese Input-Dimension ausführen."
         )
 
-    print(f"Lade trainierte Gewichte aus {SCRIPT_DIR} ...")
+    print(f"Lade {input_dim}D-Modell aus {SCRIPT_DIR} ...")
     world_model.load_state_dict(torch.load(wm_path, map_location=DEVICE))
     actor.load_state_dict(torch.load(actor_path, map_location=DEVICE))
-    if critic_path.exists():
-        critic.load_state_dict(torch.load(critic_path, map_location=DEVICE))
+    critic.load_state_dict(torch.load(critic_path, map_location=DEVICE))
 
-    # Kein ObsActor mehr: der Agent handelt ueber den mitgefuehrten RSSM-Zustand.
     return world_model, actor, critic
 
 
@@ -95,13 +110,12 @@ def plot_world_model_accuracy(results: dict, save_path: str):
     post_vals = list(results["obs_mse_posterior"]) + [results["reward_mse_posterior"]]
     prior_vals = list(results["obs_mse_prior"]) + [results["reward_mse_prior"]]
 
-    # Labels an die tatsaechliche Anzahl der Beobachtungsdimensionen anpassen,
-    # damit x und die Werte immer gleich lang sind (unabhaengig von VAR_NAMES).
     n_obs = len(results["obs_mse_posterior"])
-    if len(VAR_NAMES) == n_obs:
-        obs_labels = list(VAR_NAMES)
+    if n_obs in (2, 4):
+      obs_labels = VAR_NAMES_BY_DIM[n_obs]
     else:
-        obs_labels = [f"Obs {i}" for i in range(n_obs)]
+      obs_labels = [f"Obs {i}" for i in range(n_obs)]
+        
     labels = obs_labels + ["Reward"]
 
     x = np.arange(len(labels))
@@ -123,7 +137,7 @@ def plot_world_model_accuracy(results: dict, save_path: str):
     axes[1].set_title("Continue-Signal (Genauigkeit)", fontweight="bold")
     axes[1].legend()
 
-    plt.suptitle("Analyse 1: Weltmodell-Genauigkeit", fontsize=13, fontweight="bold")
+    plt.suptitle("Analyse 1: Weltmodell-Genauigkeit (2 Inputs)", fontsize=13, fontweight="bold")
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
     plt.close()
@@ -139,10 +153,9 @@ def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps
         lengths = []
         for ep in range(n_episodes):
             obs, _ = env.reset(seed=ep)
-            # RSSM-Zustand mitfuehren (kanonischer Handel).
             flatz, h = world_model.initial(batch_size=1, device=DEVICE)
             prev_action = torch.zeros(1, world_model.action_size, device=DEVICE)
-            obs_t = torch.tensor(visible_state(obs), dtype=torch.float32, device=DEVICE).unsqueeze(0)
+            obs_t = torch.tensor(visible_state(obs,world_model.obs_size), dtype=torch.float32, device=DEVICE).unsqueeze(0)
             flatz, h, feat = world_model.act_step(flatz, h, prev_action, obs_t)
 
             steps, done = 0, False
@@ -153,7 +166,7 @@ def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps
                 done = term or trunc
                 steps += 1
                 prev_action = torch.tensor(onehot_action(a), dtype=torch.float32, device=DEVICE).unsqueeze(0)
-                obs_t = torch.tensor(visible_state(obs), dtype=torch.float32, device=DEVICE).unsqueeze(0)
+                obs_t = torch.tensor(visible_state(obs,world_model.obs_size), dtype=torch.float32, device=DEVICE).unsqueeze(0)
                 flatz, h, feat = world_model.act_step(flatz, h, prev_action, obs_t)
             lengths.append(steps)
         return np.array(lengths)
@@ -179,8 +192,6 @@ def analyze_balance_duration(world_model, actor, n_episodes: int = 50, max_steps
 def plot_balance_duration(results: dict, save_path: str):
     trained, random_ = results["trained"], results["random"]
     fig, ax = plt.subplots(figsize=(8, 4.5))
-    # Bins bis 510: umfasst den vollen moeglichen Bereich (max_steps=500), damit
-    # starke Modelle nicht faelschlich an einer 200-Grenze "kleben".
     bins = np.arange(0, 510, 20)
     ax.hist(random_, bins=bins, alpha=0.5, label=f"Zufall (Ø={random_.mean():.1f})", color="#95a5a6")
     ax.hist(trained, bins=bins, alpha=0.6, label=f"Actor (Ø={trained.mean():.1f})", color="#2ecc71")
@@ -194,7 +205,7 @@ def plot_balance_duration(results: dict, save_path: str):
 
 
 # =============================================================================
-# 3. Imagination-Horizont-Drift & Hilfsfunktion
+# 3. Imagination-Horizont-Drift
 # =============================================================================
 @torch.no_grad()
 def _open_loop_rollout_fixed_actions(world_model, start_flatz, start_h, real_actions):
@@ -253,12 +264,12 @@ def plot_imagination_drift(results: dict, save_path: str):
 
 
 # =============================================================================
-# 4. "Traum vs. Realität" (Direkter Trajektorien-Vergleich)
+# 4. "Traum vs. Realität" (Trajektorien-Vergleich)
 # =============================================================================
 @torch.no_grad()
 def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, horizon: int = 25):
-    """Pickt eine Episode und stellt echten Zustand vs. geträumten Zustand dar."""
     world_model.eval()
+    var_names = VAR_NAMES_BY_DIM[world_model.obs_size]
     ep = max(test_episodes, key=lambda e: len(e["actions"]))
     H = min(horizon, len(ep["actions"]) - 2)
 
@@ -273,11 +284,10 @@ def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, hori
     real_future = vis[2:2 + H]
 
     steps = np.arange(1, H + 1)
-    # Ein Subplot pro Zustandsvariable (jetzt 4).
-    n = len(VAR_NAMES)
-    fig, axes = plt.subplots(1, n, figsize=(4.5 * n, 4.5))
+    n = len(var_names)
+    fig, axes = plt.subplots(1, n, figsize=(5 * n, 4.5))
 
-    for i, name in enumerate(VAR_NAMES):
+    for i, name in enumerate(var_names):
         axes[i].plot(steps, real_future[:, i], label="Reale Umgebung (Wahrheit)", color="black", linewidth=2.5)
         axes[i].plot(steps, imagined_obs[:, i], label="Modell-Traum (Prior)", color="#3498db", linestyle="--", linewidth=2.5)
         axes[i].set_title(f"Zustandsverlauf: {name}", fontweight="bold")
@@ -286,7 +296,7 @@ def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, hori
         axes[i].grid(True, alpha=0.3)
         axes[i].legend()
 
-    plt.suptitle("Analyse 4: Intuitions-Check — Wie präzise 'träumt' das Weltmodell?", fontsize=13, fontweight="bold")
+    plt.suptitle(f"Analyse 4: Traum vs. Realität ({world_model.obs_size} Inputs)",fontsize=13,fontweight="bold",)   
     plt.tight_layout()
     plt.savefig(save_path, dpi=120)
     plt.close()
@@ -294,18 +304,11 @@ def plot_qualitative_trajectory(world_model, test_episodes, save_path: str, hori
 
 
 # =============================================================================
-# 5. Policy-Entscheidungslandschaft (2D-Heatmap ueber RSSM-Latent)
+# 5. Policy-Entscheidungslandschaft
 # =============================================================================
+
 @torch.no_grad()
 def plot_policy_landscape(world_model, actor, save_path: str):
-    """Scannt ein 2D-Gitter (Position, Winkel) ab. Da die Policy jetzt auf
-    RSSM-Latent-Features operiert, wird jeder Gitterpunkt zuerst ueber einen
-    act_step (Nullzustand + Null-Aktion) in ein Latent-Feature kodiert und dann
-    an den Actor gegeben. Geschwindigkeiten werden auf 0 gesetzt.
-
-    Hinweis: Weil der RSSM-Zustand hier ohne Historie (Nullzustand) gebildet
-    wird, ist dies eine Naeherung der Policy-Landschaft, keine exakte Karte des
-    Verhaltens waehrend einer laufenden Episode."""
     world_model.eval()
     actor.eval()
 
@@ -313,30 +316,47 @@ def plot_policy_landscape(world_model, actor, save_path: str):
     theta_grid = np.linspace(-0.22, 0.22, 60)
     X, Y = np.meshgrid(x_grid, theta_grid)
 
-    # 4D-Beobachtung je Gitterpunkt: [x, x_dot=0, theta, theta_dot=0]
     xr = X.ravel()
     tr = Y.ravel()
-    zeros = np.zeros_like(xr)
-    grid_obs = np.stack([xr, zeros, tr, zeros], axis=-1).astype(np.float32)  # (N, 4)
+
+    if world_model.obs_size == 2:
+        # Beobachtung: [Position, Winkel]
+        grid_obs = np.stack([xr, tr], axis=-1).astype(np.float32)
+        title = "Policy-Heatmap (2 Inputs)"
+    elif world_model.obs_size == 4:
+        # Gymnasium-Reihenfolge:
+        # [Position, Geschwindigkeit, Winkel, Winkelgeschwindigkeit]
+        # Geschwindigkeit und Winkelgeschwindigkeit werden auf 0 fixiert.
+        grid_obs = np.stack(
+            [xr, np.zeros_like(xr), tr, np.zeros_like(tr)],
+            axis=-1,
+        ).astype(np.float32)
+        title = "Policy-Heatmap (4 Inputs; Geschwindigkeiten = 0)"
+    else:
+        raise ValueError("Das Modell muss 2 oder 4 Inputs haben.")
+
     grid_t = torch.tensor(grid_obs, device=DEVICE)
 
     N = grid_t.shape[0]
     flatz, h = world_model.initial(batch_size=N, device=DEVICE)
     prev_action = torch.zeros(N, world_model.action_size, device=DEVICE)
+
     flatz, h, feat = world_model.act_step(flatz, h, prev_action, grid_t)
 
-    logits = actor(feat)
-    probs = F.softmax(logits, dim=-1)[:, 1].cpu().numpy()  # P(Aktion 1 = RECHTS)
+    probs = F.softmax(actor(feat), dim=-1)[:, 1].cpu().numpy()
     Z = probs.reshape(X.shape)
 
     fig, ax = plt.subplots(figsize=(8, 5.5))
-    contour = ax.pcolormesh(X, Y, Z, cmap="RdYlGn", vmin=0, vmax=1, shading="auto", alpha=0.85)
+    contour = ax.pcolormesh(
+        X, Y, Z, cmap="RdYlGn", vmin=0, vmax=1,
+        shading="auto", alpha=0.85,
+    )
     cbar = fig.colorbar(contour, ax=ax)
-    cbar.set_label("Aktions-Wahrscheinlichkeit für RECHTS (Aktion 1)", fontsize=10)
+    cbar.set_label("Wahrscheinlichkeit für Aktion 1 (RECHTS)")
 
     ax.set_xlabel("Cart-Position (x)")
     ax.set_ylabel("Pol-Winkel (θ) in Radian")
-    ax.set_title("Analyse 5: Gelerntes Regelwerk des Actors (Policy-Map, Naeherung)", fontweight="bold", fontsize=12)
+    ax.set_title(title, fontweight="bold")
     ax.axhline(0, color="black", linewidth=1, linestyle=":")
     ax.axvline(0, color="black", linewidth=1, linestyle=":")
 
@@ -345,41 +365,81 @@ def plot_policy_landscape(world_model, actor, save_path: str):
     plt.close()
     print(f" -> Grafik gespeichert: {save_path}")
 
-
 # =============================================================================
 # Main Execution
 # =============================================================================
+
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Analyse des Dreamer-CartPole-Modells mit 2 oder 4 Inputs"
+    )
+    parser.add_argument(
+        "--inputs",
+        type=int,
+        choices=[2, 4],
+        default=2,
+        help="Beobachtungsdimension: 2 oder 4 (Standard: 2)",
+    )
+    args = parser.parse_args()
+    input_dim = args.inputs
+
     print("=" * 70)
-    print("Sprint 5 — Fortgeschrittene Konzept-Analyse des Dreamer-Modells")
+    print(f"Analyse des Dreamer-Modells ({input_dim} Inputs)")
     print("=" * 70)
 
-    world_model, actor, critic = load_or_train()
+    world_model, actor, critic = load_or_train(input_dim)
 
     env = gym.make("CartPole-v1")
     print("\nSammle frische Test-Episoden aus der echten Umgebung ...")
-    # Kanonischer Handel: actor + world_model, greedy (epsilon=0.0).
-    test_episodes = collect_episodes(env, actor, world_model, n_episodes=30, max_steps=500, seed=999, epsilon=0.0)
+    test_episodes = collect_episodes(
+        env,
+        actor,
+        world_model,
+        n_episodes=30,
+        max_steps=500,
+        seed=999,
+        epsilon=0.0,
+    )
     env.close()
 
     print("\n[1/5] Berechne Weltmodell-Genauigkeiten ...")
     wm_results = analyze_world_model_accuracy(world_model, test_episodes)
-    plot_world_model_accuracy(wm_results, SCRIPT_DIR / "wm_accuracy.png")
+    plot_world_model_accuracy(
+        wm_results, OUTPUT_DIR / f"wm_accuracy_{input_dim}d.png"
+    )
 
-    print("[2/5] Führe Benchmark-Rollouts durch (Trained vs Random) ...")
-    duration_results = analyze_balance_duration(world_model, actor, n_episodes=50)
-    plot_balance_duration(duration_results, SCRIPT_DIR / "balance_duration.png")
+    print("[2/5] Benchmark: trainierter Actor gegen Zufall ...")
+    duration_results = analyze_balance_duration(
+        world_model, actor, n_episodes=50
+    )
+    plot_balance_duration(
+        duration_results, OUTPUT_DIR / f"balance_duration_{input_dim}d.png"
+    )
 
-    print("[3/5] Ermittle Imagination-Drift über Zeithorizont ...")
-    drift_results = analyze_imagination_drift(world_model, test_episodes, horizon=15)
-    plot_imagination_drift(drift_results, SCRIPT_DIR / "imagination_drift.png")
+    print("[3/5] Berechne Imagination-Drift ...")
+    drift_results = analyze_imagination_drift(
+        world_model, test_episodes, horizon=15
+    )
+    plot_imagination_drift(
+        drift_results, OUTPUT_DIR / f"imagination_drift_{input_dim}d.png"
+    )
 
-    print("[4/5] Generiere qualitativen 'Traum vs. Realität'-Vergleich ...")
-    plot_qualitative_trajectory(world_model, test_episodes, SCRIPT_DIR / "trajectory_comparison.png", horizon=25)
+    print("[4/5] Erzeuge Traum-vs.-Realität-Vergleich ...")
+    plot_qualitative_trajectory(
+        world_model,
+        test_episodes,
+        OUTPUT_DIR / f"trajectory_comparison_{input_dim}d.png",
+        horizon=25,
+    )
 
-    print("[5/5] Erzeuge 2D-Policy-Entscheidungslandschaft ...")
-    plot_policy_landscape(world_model, actor, SCRIPT_DIR / "policy_landscape.png")
+    print("[5/5] Erzeuge Policy-Heatmap ...")
+    plot_policy_landscape(
+        world_model, actor, OUTPUT_DIR / f"policy_landscape_{input_dim}d.png"
+    )
 
     print("\n" + "=" * 70)
-    print("Analyse abgeschlossen!")
+    print(f"Analyse für {input_dim} Inputs abgeschlossen!")
+    print(f"Grafiken gespeichert in: {OUTPUT_DIR}")
     print("=" * 70)
